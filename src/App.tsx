@@ -11,6 +11,8 @@ import { ContentToolbar } from "./components/ContentToolbar";
 import { Inspector } from "./components/Inspector";
 import { SearchBar } from "./components/SearchBar";
 import { ShareDialog } from "./components/ShareDialog";
+import { Button } from "@/components/ui/button";
+import { TooltipProvider, Hint } from "@/components/ui/tooltip";
 
 function App() {
   const { disks, error, loading, lastImport, catalogPath, setImportResult, setError, setLoading } =
@@ -143,44 +145,34 @@ function App() {
   const hasCatalog = disks.length > 0;
 
   return (
+    <TooltipProvider delayDuration={350} skipDelayDuration={120}>
     <div className="flex h-full flex-col bg-neutral-950 text-neutral-200">
-      <header className="flex items-center gap-3 border-b border-neutral-800 px-4 py-2">
-        <Database className="h-5 w-5 shrink-0 text-emerald-400" />
-        <h1 className="shrink-0 text-sm font-semibold tracking-tight">DiskDex</h1>
-        <div className="mx-2 flex-1">{hasCatalog && <SearchBar />}</div>
+      <header className="flex items-center gap-3 border-b border-border bg-gradient-to-b from-neutral-900/80 to-neutral-950 px-4 py-2 shadow-[0_1px_0_0_rgba(255,255,255,0.03)]">
         <div className="flex shrink-0 items-center gap-2">
-          <button
-            onClick={() => setScanOpen(true)}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-          >
-            <ScanLine className="h-3.5 w-3.5" />
+          <span className="grid h-7 w-7 place-items-center rounded-md bg-primary/15 ring-1 ring-primary/30">
+            <Database className="h-4 w-4 text-primary" />
+          </span>
+          <h1 className="text-sm font-semibold tracking-tight">DiskDex</h1>
+        </div>
+        <div className="mx-2 flex-1">{hasCatalog && <SearchBar />}</div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button variant="accent" onClick={() => setScanOpen(true)} disabled={loading}>
+            <ScanLine />
             Escanear
-          </button>
-          <button
-            onClick={handleImport}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-          >
-            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Import className="h-3.5 w-3.5" />}
+          </Button>
+          <Button onClick={handleImport} disabled={loading}>
+            {loading ? <Loader2 className="animate-spin" /> : <Import />}
             Importar
-          </button>
-          <button
-            onClick={handleOpen}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-neutral-700 px-3 py-1.5 text-xs font-medium text-neutral-200 hover:bg-neutral-800 disabled:opacity-50"
-          >
-            <FolderOpen className="h-3.5 w-3.5" />
+          </Button>
+          <Button variant="outline" onClick={handleOpen} disabled={loading}>
+            <FolderOpen />
             Abrir
-          </button>
-          <button
-            onClick={() => setShareOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-neutral-700 px-3 py-1.5 text-xs font-medium text-neutral-200 hover:bg-neutral-800"
-            title="Conector remoto seguro"
-          >
-            <Share2 className="h-3.5 w-3.5" />
-            Compartir
-          </button>
+          </Button>
+          <Hint label="Conector remoto seguro">
+            <Button variant="ghost" size="icon" onClick={() => setShareOpen(true)} aria-label="Compartir">
+              <Share2 />
+            </Button>
+          </Hint>
         </div>
       </header>
 
@@ -236,6 +228,7 @@ function App() {
       )}
       {shareOpen && <ShareDialog onClose={() => setShareOpen(false)} />}
     </div>
+    </TooltipProvider>
   );
 }
 

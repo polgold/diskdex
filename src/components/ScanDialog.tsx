@@ -36,9 +36,9 @@ export function ScanDialog({ onClose, onScan, scanningPath }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="w-full max-w-lg rounded-xl border border-neutral-800 bg-neutral-900 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in">
+      <div className="w-full max-w-lg rounded-xl border border-border bg-card shadow-pop animate-zoom-in">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold">Escanear un disco montado</h2>
           <div className="flex items-center gap-1">
             <button

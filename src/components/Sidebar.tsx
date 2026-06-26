@@ -84,8 +84,10 @@ function TreeNode({ diskId, parentId, label, trail, depth, expandable, isDisk, o
     <div>
       <div
         onClick={activate}
-        className={`group flex cursor-pointer items-center gap-1 rounded py-1 pr-2 hover:bg-neutral-800/60 ${
-          isCurrent ? "bg-neutral-800 text-white" : "text-neutral-300"
+        className={`group flex cursor-pointer items-center gap-1 rounded-md py-1 pr-2 transition-colors duration-150 ${
+          isCurrent
+            ? "bg-primary/10 text-foreground shadow-[inset_2px_0_0_0_hsl(var(--primary))]"
+            : "text-neutral-300 hover:bg-accent/60"
         }`}
         style={{ paddingLeft: depth * 14 + 4 }}
         title={label}
@@ -99,7 +101,7 @@ function TreeNode({ diskId, parentId, label, trail, depth, expandable, isDisk, o
           <ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`} />
         </button>
         {isDisk ? (
-          <HardDrive className={`h-4 w-4 shrink-0 ${online ? "text-emerald-400" : "text-neutral-500"}`} />
+          <HardDrive className={`h-4 w-4 shrink-0 ${online ? "text-primary" : "text-neutral-500"}`} />
         ) : (
           <Folder className="h-4 w-4 shrink-0 text-sky-400/80" />
         )}

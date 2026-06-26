@@ -113,14 +113,14 @@ export function Modal({
   children: React.ReactNode;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-xl border border-neutral-800 bg-neutral-900 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in">
+      <div className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-xl border border-border bg-card shadow-pop animate-zoom-in">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 className="flex items-center gap-2 text-sm font-semibold">
             {icon}
             {title}
           </h2>
-          <button onClick={onClose} className="rounded p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200">
+          <button onClick={onClose} className="rounded-md p-1.5 text-neutral-400 transition-colors hover:bg-accent hover:text-neutral-100">
             <X className="h-4 w-4" />
           </button>
         </div>

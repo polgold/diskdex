@@ -2,8 +2,41 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color-scheme: dark;
+/* Design tokens (shadcn/ui) — tema oscuro slate premium, único modo de la app. */
+@layer base {
+  :root {
+    --background: 222 32% 6%;
+    --foreground: 210 20% 92%;
+
+    --card: 222 26% 9%;
+    --card-foreground: 210 20% 92%;
+
+    --popover: 222 30% 8%;
+    --popover-foreground: 210 20% 92%;
+
+    --primary: 152 58% 43%;
+    --primary-foreground: 150 40% 97%;
+
+    --secondary: 222 16% 16%;
+    --secondary-foreground: 210 20% 90%;
+
+    --muted: 222 16% 14%;
+    --muted-foreground: 215 15% 62%;
+
+    --accent: 222 18% 17%;
+    --accent-foreground: 210 20% 95%;
+
+    --destructive: 0 62% 52%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 222 16% 18%;
+    --input: 222 16% 20%;
+    --ring: 152 58% 48%;
+
+    --radius: 0.625rem;
+
+    color-scheme: dark;
+  }
 }
 
 html,
@@ -15,7 +48,28 @@ body,
 
 body {
   @apply bg-neutral-950 text-neutral-200 antialiased;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: theme("fontFamily.sans");
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Números tabulares en datos/tamaños para que las columnas no “bailen”. */
+.font-mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Selección con tinte de marca. */
+::selection {
+  background: hsl(var(--primary) / 0.28);
+}
+
+/* Focus ring consistente y accesible en todo lo interactivo. */
+:where(button, a, input, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring) / 0.55);
+  border-radius: var(--radius);
 }
 
 /* Scrollbars sobrios tipo herramienta de post. */
@@ -24,7 +78,14 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  @apply bg-neutral-700 rounded;
+  @apply rounded-full;
+  background: hsl(var(--border));
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-track {
   @apply bg-transparent;

@@ -82,8 +82,10 @@ function BrowseTable() {
                 key={e.id}
                 onClick={() => selectEntry(e.id)}
                 onDoubleClick={() => e.is_folder && openFolder(e)}
-                className={`absolute left-0 right-0 flex items-center px-3 text-sm ${
-                  selectedEntryId === e.id ? "bg-sky-950/40" : "hover:bg-neutral-800/40"
+                className={`absolute left-0 right-0 flex cursor-pointer items-center px-3 text-sm transition-colors duration-150 ${
+                  selectedEntryId === e.id
+                    ? "bg-primary/10 text-foreground shadow-[inset_2px_0_0_0_hsl(var(--primary))]"
+                    : "hover:bg-accent/60"
                 }`}
                 style={{ height: vi.size, transform: `translateY(${vi.start}px)` }}
               >
@@ -166,8 +168,10 @@ function SearchTable() {
               <div
                 key={it.id}
                 onClick={() => selectEntry(it.id)}
-                className={`absolute left-0 right-0 flex items-center px-3 text-sm ${
-                  selectedEntryId === it.id ? "bg-sky-950/40" : "hover:bg-neutral-800/40"
+                className={`absolute left-0 right-0 flex cursor-pointer items-center px-3 text-sm transition-colors duration-150 ${
+                  selectedEntryId === it.id
+                    ? "bg-primary/10 text-foreground shadow-[inset_2px_0_0_0_hsl(var(--primary))]"
+                    : "hover:bg-accent/60"
                 }`}
                 style={{ height: vi.size, transform: `translateY(${vi.start}px)` }}
               >

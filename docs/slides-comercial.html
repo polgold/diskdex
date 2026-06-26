@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DiskDex — Pitch comercial</title>
+<style>
+  :root{
+    --bg:#0a0a0a; --panel:#141414; --border:#262626; --fg:#e7e7e7; --muted:#8a8a8a; --dim:#5a5a5a;
+    --accent:#34d399; --accent2:#38bdf8; --amber:#fbbf24; --violet:#a78bfa;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--fg);font-family:var(--sans)}
+  body{overflow:hidden}
+  .deck{height:100vh;width:100vw;position:relative}
+  .slide{position:absolute;inset:0;display:none;flex-direction:column;justify-content:center;padding:7vh 9vw;opacity:0;transition:opacity .25s ease}
+  .slide.active{display:flex;opacity:1}
+  @media (prefers-reduced-motion:reduce){.slide{transition:none}}
+  .kicker{font-family:var(--mono);font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:1.2rem}
+  h1{font-size:clamp(2.2rem,6vw,4.6rem);line-height:1.02;letter-spacing:-.02em;font-weight:700;max-width:20ch}
+  h2{font-size:clamp(1.6rem,4vw,2.8rem);line-height:1.08;letter-spacing:-.015em;font-weight:650;margin-bottom:1.6rem;max-width:24ch}
+  .lede{font-size:clamp(1.05rem,2.2vw,1.5rem);color:var(--muted);max-width:62ch;margin-top:1.4rem;line-height:1.5}
+  ul{list-style:none;display:flex;flex-direction:column;gap:.9rem;max-width:74ch}
+  li{font-size:clamp(1rem,1.9vw,1.35rem);line-height:1.45;padding-left:1.5rem;position:relative;color:#d4d4d4}
+  li::before{content:"";position:absolute;left:0;top:.62em;width:.5rem;height:.5rem;border-radius:2px;background:var(--accent)}
+  li.sky::before{background:var(--accent2)} li.amber::before{background:var(--amber)} li.violet::before{background:var(--violet)}
+  li.dim{color:var(--muted)} li.dim::before{background:var(--dim)}
+  strong{color:#fff;font-weight:650}
+  .mono{font-family:var(--mono)} .accent{color:var(--accent)} .sky{color:var(--accent2)} .amber-t{color:var(--amber)} .violet-t{color:var(--violet)}
+  .three{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-top:1rem;max-width:90ch}
+  .card{border:1px solid var(--border);border-radius:12px;padding:1.2rem;background:var(--panel)}
+  .card .n{font-family:var(--mono);font-size:.8rem;color:var(--accent);margin-bottom:.5rem}
+  .card h3{font-size:1.15rem;margin-bottom:.4rem}
+  .card p{color:var(--muted);font-size:.95rem;line-height:1.4}
+  .vert{display:grid;grid-template-columns:1fr 1fr;gap:.8rem 2rem;max-width:80ch}
+  .vert div{font-size:1.05rem;color:#d4d4d4;padding-left:1.3rem;position:relative}
+  .vert div::before{content:"▸";position:absolute;left:0;color:var(--accent2)}
+  .vert b{color:#fff}
+  table{border-collapse:collapse;max-width:78ch;font-size:clamp(.92rem,1.7vw,1.15rem)}
+  td{padding:.55rem 1.4rem .55rem 0;border-bottom:1px solid var(--border);color:#d4d4d4;vertical-align:top}
+  td.x{color:var(--dim)} td.ok{color:var(--accent);font-weight:600;text-align:center}
+  td.no{color:#6b6b6b;text-align:center}
+  th{text-align:left;padding:.5rem 1.4rem .5rem 0;font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);border-bottom:1px solid var(--border)}
+  th.c{text-align:center}
+  .price{display:grid;grid-template-columns:repeat(3,1fr);gap:1.2rem;max-width:90ch}
+  .tier{border:1px solid var(--border);border-radius:12px;padding:1.3rem;background:var(--panel)}
+  .tier.hot{border-color:rgba(52,211,153,.4)}
+  .tier .name{font-size:.85rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  .tier .amt{font-size:1.8rem;font-weight:700;margin:.3rem 0 .8rem}
+  .tier ul{gap:.45rem} .tier li{font-size:.92rem;padding-left:1.1rem} .tier li::before{top:.55em;width:.4rem;height:.4rem}
+  .tbd{font-family:var(--mono);font-size:.7rem;color:var(--amber);border:1px solid rgba(251,191,36,.3);border-radius:4px;padding:.1rem .4rem;margin-left:.5rem}
+  .chrome{position:fixed;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:space-between;padding:.8rem 1.4rem;font-family:var(--mono);font-size:.72rem;color:var(--dim);pointer-events:none}
+  .brand{display:flex;align-items:center;gap:.5rem}
+  .dot{width:.55rem;height:.55rem;border-radius:50%;background:var(--accent)}
+  .progress{position:fixed;top:0;left:0;height:2px;background:var(--accent);transition:width .25s ease}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="deck" id="deck">
+
+  <!-- 1 — Hook -->
+  <section class="slide">
+    <div class="kicker">DiskDex</div>
+    <h1>Tu archivo crece más rápido de lo que podés encontrarlo.</h1>
+    <p class="lede">Terabytes repartidos en discos externos, NAS y backups. Cuando necesitás un
+      archivo viejo, lo buscás enchufando disco por disco. <strong>DiskDex lo encuentra en segundos —
+      sin enchufar nada.</strong></p>
+  </section>
+
+  <!-- 2 — Producto en una frase -->
+  <section class="slide">
+    <div class="kicker">Qué es</div>
+    <h2>El buscador de todos tus discos, estén o no conectados.</h2>
+    <p class="lede">Una app de escritorio (macOS y Windows) que cataloga el contenido de cada disco y
+      te deja <strong>buscar, navegar y traer</strong> cualquier archivo al instante. Un solo lugar para
+      un archivo que hoy vive disperso en estantes y cajones.</p>
+  </section>
+
+  <!-- 3 — Cómo funciona -->
+  <section class="slide">
+    <div class="kicker">Cómo funciona</div>
+    <h2>Tres pasos.</h2>
+    <div class="three">
+      <div class="card"><div class="n">01 · CATALOGÁ</div><h3>Conectá y listo</h3><p>Enchufás un disco y se cataloga solo. ¿Tenés un catálogo viejo de DiskCatalogMaker? Se importa entero, sin perder nada.</p></div>
+      <div class="card"><div class="n">02 · BUSCÁ</div><h3>Encontrá al instante</h3><p>Buscás por nombre, tipo, tamaño o fecha sobre todos los discos a la vez. Resultados en menos de un segundo, con disco y ruta.</p></div>
+      <div class="card"><div class="n">03 · TRAÉ</div><h3>Abrí o compartí</h3><p>Revelás el original, o lo traés de forma segura a otro equipo o a la nube — sin mover el disco físico.</p></div>
+    </div>
+  </section>
+
+  <!-- 4 — Funcionalidades (beneficio) -->
+  <section class="slide">
+    <div class="kicker">Lo que hace por vos</div>
+    <h2>Pensado para archivos enormes.</h2>
+    <ul>
+      <li><strong>Encontrá sin enchufar.</strong> Navegás y buscás aunque el disco esté en una caja.</li>
+      <li class="sky"><strong>Sumá discos sin fricción.</strong> Detección automática al conectar; re-escanear no duplica.</li>
+      <li><strong>Recuperá espacio.</strong> Detecta archivos duplicados entre discos y te dice cuántos TB podés liberar.</li>
+      <li class="violet"><strong>Ordená a tu manera.</strong> Etiquetá discos por ubicación física ("caja 1, estante B"), comentarios, categorías.</li>
+      <li class="amber"><strong>Compartí seguro.</strong> Traé un archivo a otro dispositivo o a la nube, read-only y cifrado.</li>
+    </ul>
+  </section>
+
+  <!-- 5 — Diferenciadores vs competencia -->
+  <section class="slide">
+    <div class="kicker">Por qué DiskDex</div>
+    <h2>Lo que la competencia no tiene.</h2>
+    <table>
+      <thead><tr><th>&nbsp;</th><th class="c">DiskDex</th><th class="c">Cataloggers clásicos</th></tr></thead>
+      <tbody>
+        <tr><td>macOS y Windows</td><td class="ok">✓</td><td class="no">parcial</td></tr>
+        <tr><td>Importa catálogos históricos .dcmf</td><td class="ok">✓</td><td class="no">—</td></tr>
+        <tr><td>Escaneo con detección al conectar</td><td class="ok">✓</td><td class="no">manual</td></tr>
+        <tr><td>Duplicados con TB recuperables</td><td class="ok">✓</td><td class="no">básico</td></tr>
+        <tr><td><b>Traer el archivo remoto, seguro</b></td><td class="ok">✓</td><td class="no">—</td></tr>
+      </tbody>
+    </table>
+    <p class="lede">El gran diferencial: no solo <em>encontrás</em> el archivo — lo <strong>traés</strong>,
+      con un conector read-only, autenticado y cifrado.</p>
+  </section>
+
+  <!-- 6 — Verticales -->
+  <section class="slide">
+    <div class="kicker">Para quién</div>
+    <h2>Cualquiera que acumule discos.</h2>
+    <div class="vert">
+      <div><b>Productoras y post.</b> Brutos, proyectos y entregas en decenas de discos.</div>
+      <div><b>Fotógrafos.</b> Años de RAW en externos y NAS.</div>
+      <div><b>Agencias y estudios.</b> Material de campañas que hay que reencontrar.</div>
+      <div><b>Archivos y medios.</b> Bibliotecas que superan cualquier disco único.</div>
+      <div><b>PYMEs con NAS.</b> Respaldos que crecen sin control.</div>
+      <div><b>Power users.</b> El que tiene "ese disco" y no sabe cuál.</div>
+    </div>
+  </section>
+
+  <!-- 7 — Seguridad -->
+  <section class="slide">
+    <div class="kicker">Confianza</div>
+    <h2>El conector es seguro por diseño.</h2>
+    <ul>
+      <li><strong>Solo lectura.</strong> Nunca escribe ni borra; no expone el filesystem, solo lo que está en el catálogo.</li>
+      <li class="sky"><strong>Autenticado por dispositivo.</strong> Emparejamiento por código, tokens de vida corta, scopes por dispositivo, revocación inmediata.</li>
+      <li><strong>Verifica el disco correcto</strong> por fingerprint y bloquea rutas fuera del volumen.</li>
+      <li class="violet"><strong>Cifrado y auditado.</strong> Transporte sobre malla privada/TLS; cada descarga queda registrada.</li>
+    </ul>
+  </section>
+
+  <!-- 8 — Pricing -->
+  <section class="slide">
+    <div class="kicker">Planes <span class="tbd">a definir</span></div>
+    <h2>Simple, por valor.</h2>
+    <div class="price">
+      <div class="tier"><div class="name">Free</div><div class="amt">$0</div><ul><li>Catalogar e importar</li><li>Buscar y navegar</li><li>1 catálogo</li></ul></div>
+      <div class="tier hot"><div class="name">Pro</div><div class="amt">$— <span style="font-size:.8rem;color:var(--muted)">/ único o anual</span></div><ul><li>Todo lo de Free</li><li>Duplicados y estadísticas</li><li>Export y multi-catálogo</li><li><b>Conector remoto seguro</b></li></ul></div>
+      <div class="tier"><div class="name">Equipo</div><div class="amt">$—</div><ul><li>Catálogos compartidos</li><li>Varios dispositivos</li><li>Soporte prioritario</li></ul></div>
+    </div>
+    <p class="lede">Números y empaquetado a confirmar — el conector seguro es el principal candidato a feature premium.</p>
+  </section>
+
+  <!-- 9 — Prueba social / madurez -->
+  <section class="slide">
+    <div class="kicker">No es una promesa</div>
+    <h2>Ya funciona, a escala real.</h2>
+    <ul>
+      <li>Probado con catálogos de <strong>millones de archivos</strong> (6,8 M de entradas) sin trabarse.</li>
+      <li>Archivos de <strong>más de 170 GB</strong> leídos sin errores (soporte real de 64 bits).</li>
+      <li>Búsqueda full-text sobre todo el archivo en <strong>menos de un segundo</strong>.</li>
+      <li class="amber">En un archivo real detectó <strong>decenas de TB recuperables</strong> en duplicados.</li>
+    </ul>
+  </section>
+
+  <!-- 10 — Roadmap -->
+  <section class="slide">
+    <div class="kicker">Hacia dónde va</div>
+    <h2>Base sólida, próximos pasos claros.</h2>
+    <ul>
+      <li><strong>Hoy:</strong> catalogar, importar, buscar fino, duplicados, export, y el conector seguro — todo funcionando.</li>
+      <li class="sky"><strong>Próximo:</strong> push directo a la nube (S3/Drive/Dropbox) con link firmado; previews de video.</li>
+      <li class="violet"><strong>Después:</strong> catálogos de equipo compartidos, apps companion móviles.</li>
+    </ul>
+  </section>
+
+  <!-- 11 — CTA -->
+  <section class="slide">
+    <div class="kicker">Empezá hoy</div>
+    <h1>Convertí tus discos en un buscador. Y traé cualquier archivo sin tocar el disco.</h1>
+    <p class="lede">Probá DiskDex con tus propios discos · <span class="accent">hola@diskdex.app</span> <span class="tbd">contacto a definir</span></p>
+  </section>
+
+</div>
+
+<div class="chrome">
+  <div class="brand"><span class="dot"></span> DiskDex</div>
+  <div>← → para navegar · F pantalla completa</div>
+  <div class="mono"><span id="cur">1</span> / <span id="total">11</span></div>
+</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];let i=0;
+  const cur=document.getElementById('cur'),total=document.getElementById('total'),progress=document.getElementById('progress');
+  total.textContent=slides.length;
+  function show(n){i=Math.max(0,Math.min(slides.length-1,n));slides.forEach((s,k)=>s.classList.toggle('active',k===i));cur.textContent=i+1;progress.style.width=((i+1)/slides.length*100)+'%';location.hash=i+1;}
+  document.addEventListener('keydown',e=>{
+    if(['ArrowRight','PageDown',' '].includes(e.key)){e.preventDefault();show(i+1);}
+    else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1);}
+    else if(e.key==='Home')show(0); else if(e.key==='End')show(slides.length-1);
+    else if(e.key.toLowerCase()==='f'){if(!document.fullscreenElement)document.documentElement.requestFullscreen();else document.exitFullscreen();}
+  });
+  document.addEventListener('click',e=>{if(e.clientX<innerWidth*0.25)show(i-1);else show(i+1);});
+  show((parseInt(location.hash.replace('#',''))||1)-1);
+</script>
+</body>
+</html>

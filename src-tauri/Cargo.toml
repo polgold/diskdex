@@ -1,0 +1,62 @@
+[package]
+name = "diskdex"
+version = "0.1.0"
+description = "Disk catalog app (DiskCatalogMaker-compatible) with secure remote connector"
+authors = ["polgold"]
+edition = "2021"
+
+[lib]
+# El sufijo `_lib` evita conflicto de nombre con el binario en Windows.
+name = "diskdex_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Importador .dcmf (sección 6): inflado zlib en streaming.
+flate2 = "1"
+
+# Base de datos: SQLite + FTS5, un archivo por catálogo.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Motor de escaneo (sección 7).
+walkdir = "2"
+# Listado de volúmenes montados + capacidad + tipo (HDD/SSD) + removible.
+sysinfo = "0.32"
+
+# Conector remoto seguro (sección 9): servidor HTTP del agente.
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "net"] }
+tokio-util = { version = "0.7", features = ["io"] }
+# Auth: JWT HS256 propio (hmac+sha2) para evitar dependencias pesadas de crypto.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+blake3 = "1"
+getrandom = "0.2"
+
+# Thumbnails / preview on-demand (P2) — solo formatos comunes para no inflar el build.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+
+# Utilidades.
+anyhow = "1"
+thiserror = "2"
+
+# Fingerprint y tamaño físico en Windows (GetCompressedFileSizeW / GetVolumeInformationW).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Storage_FileSystem",
+  "Win32_Foundation",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,53 @@
+// DiskDex — app de catálogo de discos (compatible DiskCatalogMaker).
+// Toda la lógica de FS/parsing vive en el lado nativo (Rust); la UI consume IPC.
+
+pub mod agent;
+mod commands;
+pub mod db;
+pub mod dcmf;
+pub mod scan;
+
+use commands::AppState;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::ping,
+            commands::import_dcmf,
+            commands::open_catalog,
+            commands::list_disks,
+            commands::list_children,
+            commands::entry_path,
+            commands::get_entry,
+            commands::search_entries,
+            commands::search_advanced,
+            commands::resolve_fs_path,
+            commands::get_thumbnail,
+            commands::cache_disk_thumbnails,
+            commands::add_entry_tag,
+            commands::remove_entry_tag,
+            commands::get_entry_tags,
+            commands::list_tags,
+            commands::set_entry_comment,
+            commands::set_disk_meta,
+            commands::catalog_stats,
+            commands::find_duplicates,
+            commands::write_text_file,
+            commands::agent_start,
+            commands::agent_stop,
+            commands::agent_status,
+            commands::agent_pair_code,
+            commands::agent_devices,
+            commands::agent_revoke,
+            commands::list_volumes,
+            commands::scan_disk,
+            commands::start_volume_watch,
+            commands::refresh_online_status,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

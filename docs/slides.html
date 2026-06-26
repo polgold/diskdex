@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DiskDex — Presentación</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #141414;
+    --border: #262626;
+    --fg: #e5e5e5;
+    --muted: #8a8a8a;
+    --dim: #5a5a5a;
+    --accent: #34d399;     /* emerald */
+    --accent2: #38bdf8;    /* sky */
+    --amber: #fbbf24;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: var(--sans); }
+  body { overflow: hidden; }
+
+  .deck { height: 100vh; width: 100vw; position: relative; }
+  .slide {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column; justify-content: center;
+    padding: 7vh 9vw;
+    opacity: 0; transition: opacity .25s ease;
+  }
+  .slide.active { display: flex; opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .slide { transition: none; } }
+
+  .kicker { font-family: var(--mono); font-size: .8rem; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin-bottom: 1.2rem; }
+  h1 { font-size: clamp(2.2rem, 6vw, 4.6rem); line-height: 1.02; letter-spacing: -.02em; font-weight: 700; }
+  h2 { font-size: clamp(1.6rem, 4vw, 2.8rem); line-height: 1.08; letter-spacing: -.015em; font-weight: 650; margin-bottom: 1.6rem; }
+  .lede { font-size: clamp(1.05rem, 2.2vw, 1.5rem); color: var(--muted); max-width: 60ch; margin-top: 1.4rem; line-height: 1.5; }
+  ul { list-style: none; display: flex; flex-direction: column; gap: .9rem; max-width: 72ch; }
+  li { font-size: clamp(1rem, 1.9vw, 1.35rem); line-height: 1.45; padding-left: 1.5rem; position: relative; color: #d4d4d4; }
+  li::before { content: ""; position: absolute; left: 0; top: .62em; width: .5rem; height: .5rem; border-radius: 2px; background: var(--accent); }
+  li.sky::before { background: var(--accent2); }
+  li.amber::before { background: var(--amber); }
+  li.dim { color: var(--muted); } li.dim::before { background: var(--dim); }
+  li small { color: var(--muted); font-size: .85em; }
+  .mono { font-family: var(--mono); }
+  strong { color: #fff; font-weight: 650; }
+  .accent { color: var(--accent); } .sky { color: var(--accent2); } .amber-t { color: var(--amber); }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 2.4rem 3.5rem; margin-top: 2rem; }
+  .stat .n { font-family: var(--mono); font-size: clamp(1.8rem, 4.5vw, 3rem); font-weight: 700; color: #fff; }
+  .stat .l { color: var(--muted); font-size: .95rem; margin-top: .3rem; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem 2.2rem; max-width: 80ch; }
+  .pill { display: inline-flex; align-items: center; gap: .5rem; font-family: var(--mono); font-size: .8rem; padding: .25rem .6rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .ok { color: var(--accent); border-color: rgba(52,211,153,.35); }
+  .next { color: var(--accent2); border-color: rgba(56,189,248,.35); }
+  .plan { color: var(--dim); }
+
+  table { border-collapse: collapse; max-width: 82ch; font-size: clamp(.9rem, 1.7vw, 1.15rem); }
+  td { padding: .5rem 1.2rem .5rem 0; border-bottom: 1px solid var(--border); color: #d4d4d4; }
+  td:last-child { text-align: right; }
+
+  .steps { counter-reset: s; display: flex; flex-direction: column; gap: 1.1rem; max-width: 74ch; }
+  .steps li { padding-left: 3rem; }
+  .steps li::before { counter-increment: s; content: counter(s); top: .1em; width: 1.9rem; height: 1.9rem; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); color: var(--accent); font-family: var(--mono); font-size: .95rem; display: grid; place-items: center; }
+
+  /* chrome */
+  .chrome { position: fixed; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: space-between; padding: .8rem 1.4rem; font-family: var(--mono); font-size: .72rem; color: var(--dim); pointer-events: none; }
+  .brand { display: flex; align-items: center; gap: .5rem; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--accent); }
+  .progress { position: fixed; top: 0; left: 0; height: 2px; background: var(--accent); transition: width .25s ease; }
+  .hint { color: var(--dim); }
+  .closing h1 { max-width: 22ch; }
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="deck" id="deck">
+
+  <!-- 1 -->
+  <section class="slide">
+    <div class="kicker">Catálogo de discos · macOS · Windows</div>
+    <h1>DiskDex</h1>
+    <p class="lede">Encontrá cualquier archivo de tus discos de respaldo —
+      <strong>sin enchufar un solo disco.</strong></p>
+  </section>
+
+  <!-- 2 -->
+  <section class="slide">
+    <div class="kicker">El problema</div>
+    <h2>116 TB que solo se encuentran a fuerza de enchufar discos</h2>
+    <div class="stats">
+      <div class="stat"><div class="n">~54</div><div class="l">discos de respaldo</div></div>
+      <div class="stat"><div class="n">6,8 M</div><div class="l">archivos</div></div>
+      <div class="stat"><div class="n">+116 TB</div><div class="l">de material</div></div>
+    </div>
+    <ul style="margin-top:2rem">
+      <li>Para recuperar material viejo hay que <strong>enchufar disco por disco</strong>. Horas por búsqueda.</li>
+      <li class="dim">El catálogo histórico quedó atrapado en el formato propietario <span class="mono">.dcmf</span> de DiskCatalogMaker.</li>
+    </ul>
+  </section>
+
+  <!-- 3 -->
+  <section class="slide">
+    <div class="kicker">La solución</div>
+    <h2>Un buscador instantáneo de todo tu archivo</h2>
+    <ul>
+      <li>Indexa el contenido de todos los discos y deja <strong>buscar y navegar aunque estén desconectados</strong>.</li>
+      <li>Importa el catálogo histórico sin perder nada.</li>
+      <li>Escanea discos nuevos apenas se conectan.</li>
+      <li class="sky">Pensada para sumar un <span class="sky">conector seguro</span> que traiga archivos de la LAN a la nube o a otro equipo, sin mover el disco.</li>
+    </ul>
+    <p class="lede"><span class="accent mono">261.991</span> resultados de <span class="mono">.mov</span> en <strong>medio segundo</strong>, sobre el catálogo real.</p>
+  </section>
+
+  <!-- 4 -->
+  <section class="slide">
+    <div class="kicker">Funciona hoy · Importar</div>
+    <h2>Importa tu catálogo histórico tal cual</h2>
+    <ul>
+      <li>Importa el <span class="mono">.dcmf</span> sin pérdida: nombres, jerarquía, tamaños reales y fechas.</li>
+      <li>Rutas completas correctas — <span class="mono">/SF28/HUFNAGL PILAR/private/M4ROOT/CLIP/C0001.MP4</span></li>
+    </ul>
+    <table style="margin-top:1.6rem">
+      <tr><td>Discos reconstruidos</td><td class="mono accent">54</td></tr>
+      <tr><td>Entradas (cifra exacta)</td><td class="mono accent">6.828.850</td></tr>
+      <tr><td>Archivo más grande, sin truncar (64-bit)</td><td class="mono accent">174,94 GB</td></tr>
+    </table>
+  </section>
+
+  <!-- 5 -->
+  <section class="slide">
+    <div class="kicker">Funciona hoy · Escanear</div>
+    <h2>Escanea discos nuevos apenas los conectás</h2>
+    <ul>
+      <li class="amber">Conectás un disco → aparece <span class="amber-t">"Disco detectado — Escanear ahora"</span>.</li>
+      <li>Guarda el árbol completo: tamaño <strong>lógico y físico</strong> (lo realmente ocupado) y fechas.</li>
+      <li>Guarda una <strong>huella digital del volumen</strong> para reconocerlo la próxima vez.</li>
+      <li>Re-escanear un disco ya catalogado lo <strong>actualiza sin duplicarlo</strong>.</li>
+    </ul>
+  </section>
+
+  <!-- 6 -->
+  <section class="slide">
+    <div class="kicker">Funciona hoy · Estado + Búsqueda</div>
+    <h2>Sabe qué disco está a mano, y busca al instante</h2>
+    <ul>
+      <li>Cada disco se marca <span class="accent">online</span> / <span class="dim">offline</span> según lo montado, con capacidad y cantidad de archivos.</li>
+      <li>Búsqueda full-text por nombre sobre <strong>todos los discos a la vez</strong>, con disco y ruta completa.</li>
+      <li>Sobre <span class="mono">6,8 M</span> de entradas responde en <strong>menos de un segundo</strong>.</li>
+    </ul>
+  </section>
+
+  <!-- 7 -->
+  <section class="slide">
+    <div class="kicker">Pregunta frecuente</div>
+    <h2>¿Sirve para NAS y discos de red?</h2>
+    <ul>
+      <li><strong>Sí.</strong> Si el share del NAS está montado (SMB/AFP/NFS), se escanea igual que un disco local. El modelo de datos ya contempla el tipo <span class="mono">nas</span>.</li>
+      <li class="sky">Por agregar para que sea 1-clic: botón <span class="sky">"Escanear carpeta…"</span> e identificar el NAS por su URL de red.</li>
+      <li class="dim">Matices honestos: el escaneo por red es más lento (latencia por archivo) y la huella del volumen funciona distinto que en discos locales.</li>
+    </ul>
+  </section>
+
+  <!-- 8 -->
+  <section class="slide">
+    <div class="kicker">Demo</div>
+    <h2>Cómo se ve en vivo</h2>
+    <ul class="steps">
+      <li>Abrir DiskDex — modo oscuro, sobrio, tipo herramienta de post.</li>
+      <li>Importar <span class="mono">.dcmf</span> — en minutos quedan los 54 discos en una grilla.</li>
+      <li>Conectar un disco USB — salta el banner y con un clic se escanea.</li>
+      <li>Buscar — <span class="mono">.mov</span> o un nombre de clip → resultados con disco y ruta, esté o no conectado.</li>
+    </ul>
+  </section>
+
+  <!-- 9 -->
+  <section class="slide">
+    <div class="kicker">Bajo el capó</div>
+    <h2>Cómo está hecho</h2>
+    <ul>
+      <li><strong>Tauri 2 + Rust</strong> para el motor: binario chico, rápido, multiplataforma. El trabajo pesado nunca traba la UI.</li>
+      <li><strong>React + TypeScript</strong> para una UI moderna y accesible (modo oscuro, atajos, virtualización).</li>
+      <li><strong>SQLite + full-text search</strong>: escala a millones de archivos en un catálogo portable de un solo archivo.</li>
+      <li class="sky">Seguridad por diseño para el conector: solo lectura, autenticado por dispositivo, cifrado, sin exponer nada fuera del catálogo.</li>
+    </ul>
+  </section>
+
+  <!-- 10 -->
+  <section class="slide">
+    <div class="kicker">Roadmap</div>
+    <h2>Dónde estamos y qué sigue</h2>
+    <div class="grid">
+      <span class="pill ok">✓ Importar .dcmf</span>
+      <span class="pill ok">✓ Escanear al conectar</span>
+      <span class="pill ok">✓ Online / offline</span>
+      <span class="pill ok">✓ Motor de búsqueda</span>
+      <span class="pill next">→ Navegación 3 paneles</span>
+      <span class="pill next">→ Búsqueda en pantalla</span>
+      <span class="pill plan">· Filtros avanzados</span>
+      <span class="pill plan">· Acciones: revelar / abrir</span>
+      <span class="pill plan">· Export CSV / JSON / PDF</span>
+      <span class="pill plan">· Duplicados y estadísticas</span>
+      <span class="pill plan">· Conector remoto seguro</span>
+    </div>
+  </section>
+
+  <!-- 11 -->
+  <section class="slide closing">
+    <div class="kicker">En una línea</div>
+    <h1>116 TB en 54 discos, convertidos en un buscador instantáneo.</h1>
+    <p class="lede">Y, próximamente, una forma <span class="sky">segura</span> de traer cualquier archivo
+      sin tocar el disco.</p>
+  </section>
+
+</div>
+
+<div class="chrome">
+  <div class="brand"><span class="dot"></span> DiskDex</div>
+  <div class="hint">← → para navegar · F pantalla completa</div>
+  <div class="mono"><span id="cur">1</span> / <span id="total">11</span></div>
+</div>
+
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  let i = 0;
+  const cur = document.getElementById('cur');
+  const total = document.getElementById('total');
+  const progress = document.getElementById('progress');
+  total.textContent = slides.length;
+
+  function show(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, k) => s.classList.toggle('active', k === i));
+    cur.textContent = i + 1;
+    progress.style.width = ((i + 1) / slides.length * 100) + '%';
+    location.hash = i + 1;
+  }
+  function next() { show(i + 1); }
+  function prev() { show(i - 1); }
+
+  document.addEventListener('keydown', (e) => {
+    if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); next(); }
+    else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); prev(); }
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(slides.length - 1);
+    else if (e.key.toLowerCase() === 'f') {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (e.clientX < window.innerWidth * 0.25) prev(); else next();
+  });
+
+  const start = parseInt(location.hash.replace('#', '')) || 1;
+  show(start - 1);
+</script>
+</body>
+</html>

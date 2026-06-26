@@ -45,6 +45,12 @@ getrandom = "0.2"
 # Thumbnails / preview on-demand (P2) — solo formatos comunes para no inflar el build.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 
+# Fase B — lectura del contenido (índice de nombres/tamaños/fechas) de archivos
+# comprimidos. Todo en Rust puro o con fuente bundleada (sin deps de sistema).
+zip = "2"
+sevenz-rust = "0.6"
+unrar = "0.5"
+
 # Utilidades.
 anyhow = "1"
 thiserror = "2"

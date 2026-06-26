@@ -96,6 +96,39 @@ export interface ThumbCacheSummary {
   failed: number;
 }
 
+export interface VideoMeta {
+  duration_ms: number;
+  width: number;
+  height: number;
+  fps: number;
+  vcodec: string | null;
+  acodec: string | null;
+  bitrate: number;
+}
+
+export interface VideoIndexSummary {
+  total: number;
+  indexed: number;
+  failed: number;
+  frames: number;
+  tools_ok: boolean;
+}
+
+export interface ArchiveEntry {
+  path: string;
+  name: string;
+  is_dir: boolean;
+  size: number;
+  modified: number;
+}
+
+export interface ArchiveIndexSummary {
+  total: number;
+  indexed: number;
+  failed: number;
+  items: number;
+}
+
 export interface VolumeInfo {
   name: string;
   mount_path: string;
@@ -164,6 +197,19 @@ export const api = {
     invoke<string[]>("remove_entry_tag", { entryId, tag }),
   getEntryTags: (entryId: number) => invoke<string[]>("get_entry_tags", { entryId }),
   listTags: () => invoke<TagStat[]>("list_tags"),
+
+  // Fase B — video (ffprobe/ffmpeg) y contenido de archivos comprimidos
+  mediaToolsAvailable: () => invoke<boolean>("media_tools_available"),
+  indexDiskVideos: (diskId: number) =>
+    invoke<VideoIndexSummary>("index_disk_videos", { diskId }),
+  getVideoMeta: (entryId: number) => invoke<VideoMeta | null>("get_video_meta", { entryId }),
+  getVideoFrames: (entryId: number) => invoke<string[]>("get_video_frames", { entryId }),
+  detectVideoScenes: (entryId: number, threshold?: number) =>
+    invoke<number[]>("detect_video_scenes", { entryId, threshold }),
+  indexDiskArchives: (diskId: number) =>
+    invoke<ArchiveIndexSummary>("index_disk_archives", { diskId }),
+  listArchiveContents: (entryId: number) =>
+    invoke<ArchiveEntry[]>("list_archive_contents", { entryId }),
 
   // M7 — metadata
   setEntryComment: (entryId: number, comment: string | null) =>

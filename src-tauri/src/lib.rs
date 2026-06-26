@@ -2,10 +2,12 @@
 // Toda la lógica de FS/parsing vive en el lado nativo (Rust); la UI consume IPC.
 
 pub mod agent;
+pub mod archive;
 mod commands;
 pub mod db;
 pub mod dcmf;
 pub mod scan;
+pub mod video;
 
 use commands::AppState;
 
@@ -28,6 +30,13 @@ pub fn run() {
             commands::resolve_fs_path,
             commands::get_thumbnail,
             commands::cache_disk_thumbnails,
+            commands::media_tools_available,
+            commands::index_disk_videos,
+            commands::get_video_meta,
+            commands::get_video_frames,
+            commands::detect_video_scenes,
+            commands::index_disk_archives,
+            commands::list_archive_contents,
             commands::add_entry_tag,
             commands::remove_entry_tag,
             commands::get_entry_tags,

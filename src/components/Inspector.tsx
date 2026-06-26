@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Folder, File as FileIcon, Info, FolderSearch, ExternalLink, Copy, Check, Tag, X } from "lucide-react";
-import { api, type EntryRow } from "../lib/ipc";
+import { Folder, File as FileIcon, Info, FolderSearch, ExternalLink, Copy, Check, Tag, X, Film, Package, FolderClosed } from "lucide-react";
+import { api, type EntryRow, type VideoMeta, type ArchiveEntry } from "../lib/ipc";
 import { useCatalog } from "../store/catalog";
-import { formatBytes, formatDate } from "../lib/format";
+import { formatBytes, formatDate, formatDuration, formatBitrate, formatCount } from "../lib/format";
 import { revealOriginal, openOriginal, copyText } from "../lib/actions";
 
 /** Inspector del ítem seleccionado (M2): detalle + ruta completa. */
@@ -54,6 +54,10 @@ export function Inspector() {
       <Actions entry={entry} catalogPath={path} />
 
       <ThumbnailPreview entry={entry} />
+
+      <VideoInfo entry={entry} />
+
+      <ArchiveContents entry={entry} />
 
       <dl className="mt-4 space-y-2.5 text-xs">
         <Field label="Tipo" value={entry.is_folder ? "Carpeta" : entry.ext ? `Archivo .${entry.ext}` : "Archivo"} />
@@ -192,14 +196,25 @@ function CommentEditor({ entry }: { entry: EntryRow }) {
 }
 
 const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff"]);
+const VIDEO_EXTS = new Set([
+  "mp4", "mov", "m4v", "avi", "mkv", "mxf", "mts", "m2ts", "wmv", "webm", "mpg", "mpeg", "3gp",
+  "flv", "ogv", "vob", "m2v",
+]);
+const ARCHIVE_EXTS = new Set(["zip", "7z", "rar", "cbz", "cbr"]);
+
+const extOf = (e: EntryRow) => (e.is_folder ? null : e.ext?.toLowerCase() ?? null);
+const isImage = (e: EntryRow) => !!extOf(e) && IMAGE_EXTS.has(extOf(e)!);
+const isVideo = (e: EntryRow) => !!extOf(e) && VIDEO_EXTS.has(extOf(e)!);
+const isArchive = (e: EntryRow) => !!extOf(e) && ARCHIVE_EXTS.has(extOf(e)!);
 
 function ThumbnailPreview({ entry }: { entry: EntryRow }) {
   const [src, setSrc] = useState<string | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const previewable = isImage(entry) || isVideo(entry);
 
   useEffect(() => {
     setSrc(null);
-    if (entry.is_folder || !entry.ext || !IMAGE_EXTS.has(entry.ext.toLowerCase())) {
+    if (!previewable) {
       setState("idle");
       return;
     }
@@ -212,9 +227,9 @@ function ThumbnailPreview({ entry }: { entry: EntryRow }) {
     return () => {
       cancelled = true;
     };
-  }, [entry.id, entry.ext, entry.is_folder]);
+  }, [entry.id, entry.ext, entry.is_folder, previewable]);
 
-  if (entry.is_folder || !entry.ext || !IMAGE_EXTS.has(entry.ext.toLowerCase())) return null;
+  if (!previewable) return null;
 
   return (
     <div className="mt-3 overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950">
@@ -225,6 +240,143 @@ function ThumbnailPreview({ entry }: { entry: EntryRow }) {
         </div>
       )}
       {src && <img src={src} alt={entry.name} className="mx-auto max-h-56 w-full object-contain" />}
+    </div>
+  );
+}
+
+/** Metadata técnica + tira de frames de un clip de video (Fase B). */
+function VideoInfo({ entry }: { entry: EntryRow }) {
+  const show = isVideo(entry);
+  const [meta, setMeta] = useState<VideoMeta | null>(null);
+  const [frames, setFrames] = useState<string[]>([]);
+
+  useEffect(() => {
+    setMeta(null);
+    setFrames([]);
+    if (!show) return;
+    let cancelled = false;
+    api.getVideoMeta(entry.id).then((m) => !cancelled && setMeta(m)).catch(() => {});
+    api.getVideoFrames(entry.id).then((f) => !cancelled && setFrames(f)).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [entry.id, show]);
+
+  if (!show || (!meta && frames.length === 0)) return null;
+
+  return (
+    <div className="mt-3">
+      <div className="flex items-center gap-1.5 text-xs text-neutral-500">
+        <Film className="h-3.5 w-3.5" /> Video
+      </div>
+
+      {frames.length > 0 && (
+        <div className="mt-1.5 flex gap-1 overflow-x-auto rounded-lg border border-neutral-800 bg-neutral-950 p-1.5">
+          {frames.map((src, i) => (
+            <img
+              key={i}
+              src={src}
+              alt={`frame ${i + 1}`}
+              className="h-12 shrink-0 rounded object-cover ring-1 ring-neutral-800"
+            />
+          ))}
+        </div>
+      )}
+
+      {meta && (
+        <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+          <MetaCell label="Duración" value={formatDuration(meta.duration_ms)} />
+          <MetaCell
+            label="Resolución"
+            value={meta.width && meta.height ? `${meta.width}×${meta.height}` : "—"}
+          />
+          <MetaCell label="FPS" value={meta.fps ? meta.fps.toFixed(2) : "—"} />
+          <MetaCell label="Bitrate" value={formatBitrate(meta.bitrate)} />
+          <MetaCell label="Códec video" value={meta.vcodec ?? "—"} />
+          <MetaCell label="Códec audio" value={meta.acodec ?? "—"} />
+        </dl>
+      )}
+    </div>
+  );
+}
+
+function MetaCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col rounded-md bg-neutral-900/60 px-2 py-1">
+      <dt className="text-[10px] uppercase tracking-wide text-neutral-600">{label}</dt>
+      <dd className="truncate font-mono text-neutral-200" title={value}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+/** Contenido indexado dentro de un archivo comprimido (Fase B). */
+function ArchiveContents({ entry }: { entry: EntryRow }) {
+  const show = isArchive(entry);
+  const [items, setItems] = useState<ArchiveEntry[] | null>(null);
+
+  useEffect(() => {
+    setItems(null);
+    if (!show) return;
+    let cancelled = false;
+    api
+      .listArchiveContents(entry.id)
+      .then((x) => !cancelled && setItems(x))
+      .catch(() => !cancelled && setItems([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [entry.id, show]);
+
+  if (!show || !items) return null;
+
+  const CAP = 500;
+  const files = items.filter((i) => !i.is_dir).length;
+  const shown = items.slice(0, CAP);
+
+  return (
+    <div className="mt-3">
+      <div className="flex items-center justify-between text-xs text-neutral-500">
+        <span className="flex items-center gap-1.5">
+          <Package className="h-3.5 w-3.5" /> Contenido del archivo
+        </span>
+        {items.length > 0 && (
+          <span className="text-[11px] text-neutral-600">{formatCount(files)} archivos</span>
+        )}
+      </div>
+      {items.length === 0 ? (
+        <p className="mt-1.5 rounded-md border border-neutral-800 bg-neutral-950 p-3 text-center text-[11px] text-neutral-600">
+          sin indexar (re-escaneá con el disco conectado) o archivo vacío
+        </p>
+      ) : (
+        <div className="mt-1.5 max-h-60 overflow-auto rounded-lg border border-neutral-800 bg-neutral-950">
+          {shown.map((it) => (
+            <div
+              key={it.path}
+              className="flex items-center gap-2 px-2 py-1 text-xs odd:bg-neutral-900/30"
+              title={it.path}
+            >
+              {it.is_dir ? (
+                <FolderClosed className="h-3.5 w-3.5 shrink-0 text-sky-400/70" />
+              ) : (
+                <FileIcon className="h-3.5 w-3.5 shrink-0 text-neutral-600" />
+              )}
+              <span className="min-w-0 flex-1 truncate text-neutral-300">{it.path}</span>
+              {!it.is_dir && (
+                <span className="shrink-0 font-mono text-[11px] text-neutral-500">
+                  {formatBytes(it.size)}
+                </span>
+              )}
+            </div>
+          ))}
+          {items.length > CAP && (
+            <div className="px-2 py-1.5 text-center text-[11px] text-neutral-600">
+              … y {formatCount(items.length - CAP)} más
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -113,6 +113,38 @@ CREATE TABLE IF NOT EXISTS thumbnails (
   created_at INTEGER
 );
 
+-- Video (Fase B): metadata técnica + tira de frames/escenas, cacheadas en el .dccat.
+CREATE TABLE IF NOT EXISTS video_meta (
+  entry_id    INTEGER PRIMARY KEY,
+  duration_ms INTEGER,
+  width       INTEGER,
+  height      INTEGER,
+  fps         REAL,
+  vcodec      TEXT,
+  acodec      TEXT,
+  bitrate     INTEGER,
+  probed_at   INTEGER
+);
+CREATE TABLE IF NOT EXISTS video_frames (
+  id       INTEGER PRIMARY KEY,
+  entry_id INTEGER NOT NULL,
+  pos_ms   INTEGER,
+  png      BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_video_frames_entry ON video_frames(entry_id);
+
+-- Contenido indexado de archivos comprimidos (Fase B): ZIP/7z/RAR.
+CREATE TABLE IF NOT EXISTS archive_entries (
+  id       INTEGER PRIMARY KEY,
+  entry_id INTEGER NOT NULL,
+  path     TEXT NOT NULL,
+  name     TEXT NOT NULL,
+  is_dir   INTEGER NOT NULL,
+  size     INTEGER,
+  modified INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_archive_entries_entry ON archive_entries(entry_id);
+
 CREATE TABLE IF NOT EXISTS access_log (
   id INTEGER PRIMARY KEY, ts INTEGER, device_id TEXT, action TEXT,
   disk_id INTEGER, entry_id INTEGER, bytes INTEGER, result TEXT
@@ -291,15 +323,17 @@ pub fn ingest_scanned(
                  SELECT 'delete', id, name FROM entries WHERE disk_id = ?1",
                 params![old],
             )?;
-            // Limpiar thumbnails y vínculos de tags de las entradas que se van.
-            tx.execute(
+            // Limpiar datos derivados de las entradas que se van.
+            let derived = [
                 "DELETE FROM thumbnails WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
-                params![old],
-            )?;
-            tx.execute(
                 "DELETE FROM entry_tags WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
-                params![old],
-            )?;
+                "DELETE FROM video_meta WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+                "DELETE FROM video_frames WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+                "DELETE FROM archive_entries WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+            ];
+            for sql in derived {
+                tx.execute(sql, params![old])?;
+            }
             tx.execute("DELETE FROM entries WHERE disk_id = ?1", params![old])?;
             tx.execute("DELETE FROM disks WHERE id = ?1", params![old])?;
             replaced = true;
@@ -531,6 +565,192 @@ pub fn image_entries_without_thumb(
         "SELECT e.id FROM entries e \
          WHERE e.disk_id = ? AND e.is_folder = 0 AND e.ext IN ({ph}) \
          AND NOT EXISTS (SELECT 1 FROM thumbnails th WHERE th.entry_id = e.id)"
+    );
+    let mut bind: Vec<Box<dyn ToSql>> = Vec::with_capacity(exts.len() + 1);
+    bind.push(Box::new(disk_id));
+    for e in exts {
+        bind.push(Box::new(e.to_string()));
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(bind.iter().map(|b| b.as_ref())), |r| {
+        r.get::<_, i64>(0)
+    })?;
+    rows.collect()
+}
+
+// ---------- Video: metadata + frames (Fase B) ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoMetaRow {
+    pub duration_ms: i64,
+    pub width: i64,
+    pub height: i64,
+    pub fps: f64,
+    pub vcodec: Option<String>,
+    pub acodec: Option<String>,
+    pub bitrate: i64,
+}
+
+/// Guarda (o reemplaza) la metadata técnica de un video.
+pub fn store_video_meta(conn: &Connection, entry_id: i64, m: &VideoMetaRow) -> DbResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO video_meta \
+         (entry_id, duration_ms, width, height, fps, vcodec, acodec, bitrate, probed_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            entry_id, m.duration_ms, m.width, m.height, m.fps, m.vcodec, m.acodec, m.bitrate, now_secs()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Metadata técnica de un video (si fue indexada).
+pub fn get_video_meta(conn: &Connection, entry_id: i64) -> DbResult<Option<VideoMetaRow>> {
+    conn.query_row(
+        "SELECT duration_ms, width, height, fps, vcodec, acodec, bitrate FROM video_meta WHERE entry_id = ?1",
+        params![entry_id],
+        |r| {
+            Ok(VideoMetaRow {
+                duration_ms: r.get(0)?,
+                width: r.get(1)?,
+                height: r.get(2)?,
+                fps: r.get(3)?,
+                vcodec: r.get(4)?,
+                acodec: r.get(5)?,
+                bitrate: r.get(6)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// IDs de videos (por extensión) de un disco aún sin metadata indexada.
+pub fn video_entries_without_meta(
+    conn: &Connection,
+    disk_id: i64,
+    exts: &[&str],
+) -> DbResult<Vec<i64>> {
+    if exts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ph = exts.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT e.id FROM entries e \
+         WHERE e.disk_id = ? AND e.is_folder = 0 AND e.ext IN ({ph}) \
+         AND NOT EXISTS (SELECT 1 FROM video_meta vm WHERE vm.entry_id = e.id)"
+    );
+    let mut bind: Vec<Box<dyn ToSql>> = Vec::with_capacity(exts.len() + 1);
+    bind.push(Box::new(disk_id));
+    for e in exts {
+        bind.push(Box::new(e.to_string()));
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(bind.iter().map(|b| b.as_ref())), |r| {
+        r.get::<_, i64>(0)
+    })?;
+    rows.collect()
+}
+
+/// Reemplaza la tira de frames de un video.
+pub fn replace_video_frames(conn: &Connection, entry_id: i64, frames: &[(i64, Vec<u8>)]) -> DbResult<()> {
+    conn.execute("DELETE FROM video_frames WHERE entry_id = ?1", params![entry_id])?;
+    let mut stmt =
+        conn.prepare("INSERT INTO video_frames(entry_id, pos_ms, png) VALUES (?1, ?2, ?3)")?;
+    for (pos_ms, png) in frames {
+        stmt.execute(params![entry_id, pos_ms, png])?;
+    }
+    Ok(())
+}
+
+/// Tira de frames cacheada de un video (orden temporal).
+pub fn get_video_frames(conn: &Connection, entry_id: i64) -> DbResult<Vec<Vec<u8>>> {
+    let mut stmt =
+        conn.prepare("SELECT png FROM video_frames WHERE entry_id = ?1 ORDER BY pos_ms")?;
+    let rows = stmt.query_map(params![entry_id], |r| r.get::<_, Vec<u8>>(0))?;
+    rows.collect()
+}
+
+// ---------- Contenido de archivos comprimidos (Fase B) ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveEntryRow {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: i64,
+    pub modified: i64,
+}
+
+/// Reemplaza el índice de contenido de un archivo comprimido.
+pub fn store_archive_entries(
+    conn: &mut Connection,
+    entry_id: i64,
+    items: &[crate::archive::ArchiveItem],
+) -> DbResult<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM archive_entries WHERE entry_id = ?1", params![entry_id])?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO archive_entries(entry_id, path, name, is_dir, size, modified) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for it in items {
+            let name = it.path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&it.path);
+            stmt.execute(params![
+                entry_id,
+                it.path,
+                name,
+                it.is_dir as i64,
+                it.size as i64,
+                it.modified
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Lista el contenido indexado de un archivo (carpetas primero, luego por nombre).
+pub fn list_archive_entries(conn: &Connection, entry_id: i64) -> DbResult<Vec<ArchiveEntryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, name, is_dir, size, modified FROM archive_entries \
+         WHERE entry_id = ?1 ORDER BY is_dir DESC, path COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map(params![entry_id], |r| {
+        Ok(ArchiveEntryRow {
+            path: r.get(0)?,
+            name: r.get(1)?,
+            is_dir: r.get::<_, i64>(2)? != 0,
+            size: r.get(3)?,
+            modified: r.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Cantidad de entradas indexadas de un archivo (0 = sin indexar / vacío).
+pub fn archive_entry_count(conn: &Connection, entry_id: i64) -> DbResult<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM archive_entries WHERE entry_id = ?1",
+        params![entry_id],
+        |r| r.get(0),
+    )
+}
+
+/// IDs de archivos comprimidos (por extensión) de un disco aún sin indexar.
+pub fn archive_files_without_index(
+    conn: &Connection,
+    disk_id: i64,
+    exts: &[&str],
+) -> DbResult<Vec<i64>> {
+    if exts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ph = exts.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT e.id FROM entries e \
+         WHERE e.disk_id = ? AND e.is_folder = 0 AND e.ext IN ({ph}) \
+         AND NOT EXISTS (SELECT 1 FROM archive_entries ae WHERE ae.entry_id = e.id)"
     );
     let mut bind: Vec<Box<dyn ToSql>> = Vec::with_capacity(exts.len() + 1);
     bind.push(Box::new(disk_id));
@@ -1305,6 +1525,80 @@ mod tests {
 
         // Ya no figura como pendiente.
         assert!(image_entries_without_thumb(&conn, disk_id, &["jpg", "png"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn video_meta_store_get_and_pending() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk()]).unwrap();
+        let mp4: i64 = conn.query_row("SELECT id FROM entries WHERE name='C0001.MP4'", [], |r| r.get(0)).unwrap();
+        let disk_id: i64 = conn.query_row("SELECT id FROM disks LIMIT 1", [], |r| r.get(0)).unwrap();
+
+        // mp4 figura como pendiente antes de indexar.
+        let pending = video_entries_without_meta(&conn, disk_id, &["mp4", "mov"]).unwrap();
+        assert!(pending.contains(&mp4));
+        assert!(get_video_meta(&conn, mp4).unwrap().is_none());
+
+        let m = VideoMetaRow {
+            duration_ms: 4500,
+            width: 3840,
+            height: 2160,
+            fps: 29.97,
+            vcodec: Some("hevc".into()),
+            acodec: Some("aac".into()),
+            bitrate: 120_000_000,
+        };
+        store_video_meta(&conn, mp4, &m).unwrap();
+        let got = get_video_meta(&conn, mp4).unwrap().unwrap();
+        assert_eq!(got.width, 3840);
+        assert_eq!(got.vcodec.as_deref(), Some("hevc"));
+        assert!((got.fps - 29.97).abs() < 0.01);
+
+        // Frames.
+        replace_video_frames(&conn, mp4, &[(1000, vec![1, 2]), (2000, vec![3, 4])]).unwrap();
+        assert_eq!(get_video_frames(&conn, mp4).unwrap().len(), 2);
+
+        // Ya no figura pendiente.
+        assert!(!video_entries_without_meta(&conn, disk_id, &["mp4", "mov"]).unwrap().contains(&mp4));
+    }
+
+    #[test]
+    fn archive_index_store_list_and_pending() {
+        use crate::archive::ArchiveItem;
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk()]).unwrap();
+        conn.execute(
+            "INSERT INTO entries (disk_id, parent_id, name, is_folder, ext) \
+             VALUES ((SELECT id FROM disks LIMIT 1), NULL, 'backup.zip', 0, 'zip')",
+            [],
+        )
+        .unwrap();
+        let zip: i64 = conn.query_row("SELECT id FROM entries WHERE name='backup.zip'", [], |r| r.get(0)).unwrap();
+        let disk_id: i64 = conn.query_row("SELECT id FROM disks LIMIT 1", [], |r| r.get(0)).unwrap();
+
+        let pending = archive_files_without_index(&conn, disk_id, &["zip", "7z", "rar"]).unwrap();
+        assert_eq!(pending, vec![zip]);
+
+        let items = vec![
+            ArchiveItem { path: "fotos".into(), size: 0, modified: 0, is_dir: true },
+            ArchiveItem { path: "fotos/a.jpg".into(), size: 2048, modified: 1700000000, is_dir: false },
+            ArchiveItem { path: "leeme.txt".into(), size: 12, modified: 0, is_dir: false },
+        ];
+        store_archive_entries(&mut conn, zip, &items).unwrap();
+
+        assert_eq!(archive_entry_count(&conn, zip).unwrap(), 3);
+        let listed = list_archive_entries(&conn, zip).unwrap();
+        // Carpetas primero.
+        assert!(listed[0].is_dir);
+        let jpg = listed.iter().find(|e| e.path == "fotos/a.jpg").unwrap();
+        assert_eq!(jpg.name, "a.jpg");
+        assert_eq!(jpg.size, 2048);
+
+        // Re-indexar reemplaza (no duplica).
+        store_archive_entries(&mut conn, zip, &items).unwrap();
+        assert_eq!(archive_entry_count(&conn, zip).unwrap(), 3);
+        // Ya no pendiente.
+        assert!(archive_files_without_index(&conn, disk_id, &["zip"]).unwrap().is_empty());
     }
 
     #[test]

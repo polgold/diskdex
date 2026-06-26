@@ -26,3 +26,21 @@ export function formatDate(unixSeconds: number | null | undefined): string {
 export function formatCount(n: number): string {
   return n.toLocaleString();
 }
+
+/** Duración en ms → "1:02:03" o "2:05". */
+export function formatDuration(ms: number | null | undefined): string {
+  if (!ms || ms <= 0) return "—";
+  const total = Math.round(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/** Bitrate en bits/s → "12.0 Mbps". */
+export function formatBitrate(bps: number | null | undefined): string {
+  if (!bps || bps <= 0) return "—";
+  const mbps = bps / 1_000_000;
+  return mbps >= 1 ? `${mbps.toFixed(1)} Mbps` : `${(bps / 1000).toFixed(0)} kbps`;
+}

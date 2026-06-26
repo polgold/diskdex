@@ -2,9 +2,11 @@
 //! lado nativo; el frontend solo consume datos ya indexados (sección 2).
 
 use crate::agent::{self, AgentConfig};
+use crate::archive;
 use crate::db;
 use crate::dcmf;
 use crate::scan::{self, ScanOptions, VolumeInfo};
+use crate::video;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -468,6 +470,201 @@ pub fn cache_disk_thumbnails(
         }
     }
     Ok(ThumbCacheSummary { total, generated, failed })
+}
+
+// ---------- Video + archivos (Fase B) ----------
+
+/// Extensiones de video que intentamos indexar con ffprobe/ffmpeg.
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mov", "m4v", "avi", "mkv", "mxf", "mts", "m2ts", "wmv", "webm", "mpg", "mpeg", "3gp",
+    "flv", "ogv", "vob", "m2v",
+];
+/// Extensiones de archivos comprimidos cuyo contenido sabemos indexar.
+const ARCHIVE_EXTS: &[&str] = &["zip", "7z", "rar", "cbz", "cbr"];
+/// Frames de la tira por video y ancho de cada uno.
+const VIDEO_STRIP_FRAMES: usize = 5;
+const VIDEO_FRAME_W: u32 = 320;
+
+fn png_data_url(png: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    format!("data:image/png;base64,{}", STANDARD.encode(png))
+}
+
+/// ¿Están disponibles ffprobe/ffmpeg? La UI lo usa para mostrar/ocultar features.
+#[tauri::command]
+pub fn media_tools_available() -> bool {
+    video::tools_available()
+}
+
+#[derive(Serialize)]
+pub struct VideoIndexSummary {
+    pub total: i64,
+    pub indexed: i64,
+    pub failed: i64,
+    pub frames: i64,
+    pub tools_ok: bool,
+}
+
+/// Indexa metadata + tira de frames de los videos de un disco (post-escaneo,
+/// con el disco montado). Guarda también un frame póster como thumbnail, así los
+/// videos se previsualizan offline igual que las imágenes.
+#[tauri::command]
+pub fn index_disk_videos(
+    state: tauri::State<'_, AppState>,
+    disk_id: i64,
+) -> Result<VideoIndexSummary, String> {
+    if !video::tools_available() {
+        return Ok(VideoIndexSummary { total: 0, indexed: 0, failed: 0, frames: 0, tools_ok: false });
+    }
+    let jobs: Vec<(i64, PathBuf)> = {
+        let guard = state.catalog.lock().unwrap();
+        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+        let ids = db::video_entries_without_meta(&cat.conn, disk_id, VIDEO_EXTS)
+            .map_err(|e| e.to_string())?;
+        ids.into_iter()
+            .filter_map(|id| resolve_real_path(&cat.conn, id).ok().map(|p| (id, p)))
+            .collect()
+    };
+
+    let total = jobs.len() as i64;
+    let (mut indexed, mut failed, mut frames) = (0i64, 0i64, 0i64);
+    for (id, path) in jobs {
+        let meta = match video::probe_video(&path) {
+            Ok(m) => m,
+            Err(_) => {
+                failed += 1;
+                continue;
+            }
+        };
+        let row = db::VideoMetaRow {
+            duration_ms: meta.duration_ms,
+            width: meta.width,
+            height: meta.height,
+            fps: meta.fps,
+            vcodec: meta.vcodec.clone(),
+            acodec: meta.acodec.clone(),
+            bitrate: meta.bitrate,
+        };
+
+        // Tira de frames (trabajo pesado, fuera del lock).
+        let ts = video::strip_timestamps(meta.duration_ms, VIDEO_STRIP_FRAMES);
+        let mut strip: Vec<(i64, Vec<u8>)> = Vec::new();
+        for t in &ts {
+            if let Ok(png) = video::extract_frame(&path, *t, VIDEO_FRAME_W) {
+                strip.push(((t * 1000.0) as i64, png));
+            }
+        }
+        let poster = strip.get(strip.len() / 2).map(|(_, p)| p.clone());
+
+        let guard = state.catalog.lock().unwrap();
+        if let Some(cat) = guard.as_ref() {
+            let _ = db::store_video_meta(&cat.conn, id, &row);
+            if !strip.is_empty() {
+                frames += strip.len() as i64;
+                let _ = db::replace_video_frames(&cat.conn, id, &strip);
+            }
+            if let Some(p) = &poster {
+                let _ = db::store_thumbnail(&cat.conn, id, p, 0, 0);
+            }
+            indexed += 1;
+        }
+    }
+    Ok(VideoIndexSummary { total, indexed, failed, frames, tools_ok: true })
+}
+
+/// Metadata técnica de un video (si fue indexada).
+#[tauri::command]
+pub fn get_video_meta(
+    state: tauri::State<'_, AppState>,
+    entry_id: i64,
+) -> Result<Option<db::VideoMetaRow>, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    db::get_video_meta(&cat.conn, entry_id).map_err(|e| e.to_string())
+}
+
+/// Tira de frames cacheada de un video, como data URLs PNG.
+#[tauri::command]
+pub fn get_video_frames(
+    state: tauri::State<'_, AppState>,
+    entry_id: i64,
+) -> Result<Vec<String>, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    let frames = db::get_video_frames(&cat.conn, entry_id).map_err(|e| e.to_string())?;
+    Ok(frames.iter().map(|p| png_data_url(p)).collect())
+}
+
+/// Detección de escenas on-demand de un video (requiere disco montado). Devuelve
+/// los segundos de los cortes detectados.
+#[tauri::command]
+pub fn detect_video_scenes(
+    state: tauri::State<'_, AppState>,
+    entry_id: i64,
+    threshold: Option<f64>,
+) -> Result<Vec<f64>, String> {
+    let path = {
+        let guard = state.catalog.lock().unwrap();
+        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+        resolve_real_path(&cat.conn, entry_id)?
+    };
+    video::detect_scenes(&path, threshold.unwrap_or(0.4), 200)
+}
+
+#[derive(Serialize)]
+pub struct ArchiveIndexSummary {
+    pub total: i64,
+    pub indexed: i64,
+    pub failed: i64,
+    pub items: i64,
+}
+
+/// Indexa el contenido (nombres/tamaños/fechas) de los archivos comprimidos de un
+/// disco (post-escaneo, con el disco montado).
+#[tauri::command]
+pub fn index_disk_archives(
+    state: tauri::State<'_, AppState>,
+    disk_id: i64,
+) -> Result<ArchiveIndexSummary, String> {
+    let jobs: Vec<(i64, PathBuf)> = {
+        let guard = state.catalog.lock().unwrap();
+        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+        let ids = db::archive_files_without_index(&cat.conn, disk_id, ARCHIVE_EXTS)
+            .map_err(|e| e.to_string())?;
+        ids.into_iter()
+            .filter_map(|id| resolve_real_path(&cat.conn, id).ok().map(|p| (id, p)))
+            .collect()
+    };
+
+    let total = jobs.len() as i64;
+    let (mut indexed, mut failed, mut items) = (0i64, 0i64, 0i64);
+    for (id, path) in jobs {
+        match archive::list_archive(&path) {
+            Ok(list) => {
+                items += list.len() as i64;
+                let mut guard = state.catalog.lock().unwrap();
+                if let Some(cat) = guard.as_mut() {
+                    match db::store_archive_entries(&mut cat.conn, id, &list) {
+                        Ok(()) => indexed += 1,
+                        Err(_) => failed += 1,
+                    }
+                }
+            }
+            Err(_) => failed += 1,
+        }
+    }
+    Ok(ArchiveIndexSummary { total, indexed, failed, items })
+}
+
+/// Lista el contenido indexado de un archivo comprimido.
+#[tauri::command]
+pub fn list_archive_contents(
+    state: tauri::State<'_, AppState>,
+    entry_id: i64,
+) -> Result<Vec<db::ArchiveEntryRow>, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    db::list_archive_entries(&cat.conn, entry_id).map_err(|e| e.to_string())
 }
 
 // ---------- Tags / keywords (Fase A) ----------

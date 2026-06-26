@@ -126,14 +126,23 @@ function App() {
       );
       setScanOpen(false);
       setDetected(null);
-      // Cacheo de miniaturas en segundo plano: el disco sigue montado, así las
-      // imágenes quedan visibles aunque luego se desconecte (offline). No bloquea.
-      api
-        .cacheDiskThumbnails(r.disk_id)
-        .then((t) => {
+      // Post-escaneo en segundo plano (con el disco aún montado): miniaturas de
+      // imágenes, metadata+frames de video y contenido de archivos comprimidos.
+      // Todo queda cacheado en el .dccat y visible offline. No bloquea la UI.
+      void (async () => {
+        try {
+          const t = await api.cacheDiskThumbnails(r.disk_id);
           if (t.generated > 0) setStatus(`${formatCount(t.generated)} miniaturas cacheadas en ${name}`);
-        })
-        .catch(() => {});
+          const v = await api.indexDiskVideos(r.disk_id);
+          if (v.indexed > 0)
+            setStatus(`${formatCount(v.indexed)} videos analizados en ${name} (${formatCount(v.frames)} frames)`);
+          const a = await api.indexDiskArchives(r.disk_id);
+          if (a.indexed > 0)
+            setStatus(`${formatCount(a.indexed)} archivos comprimidos indexados en ${name}`);
+        } catch {
+          /* el indexado es best-effort; no interrumpe el flujo */
+        }
+      })();
     } catch (e) {
       setError(String(e));
       setStatus("");

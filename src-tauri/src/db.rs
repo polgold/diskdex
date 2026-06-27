@@ -2139,44 +2139,81 @@ pub struct GatherPlan {
     pub skipped_folders: u64,
 }
 
-/// Agrupa los archivos elegidos por disco (online primero). Las carpetas se ignoran
-/// en esta versión (se reporta el conteo); el caller puede expandirlas a futuro.
+/// Expande los ids elegidos a IDs de ARCHIVO: los archivos quedan, las carpetas se
+/// reemplazan por todos sus descendientes-archivo (CTE recursiva). Dedup, preservando
+/// el orden de aparición. Devuelve (ids_archivo, carpetas_expandidas).
+fn expand_to_file_ids(conn: &Connection, entry_ids: &[i64]) -> DbResult<(Vec<i64>, u64)> {
+    use std::collections::HashSet;
+    let mut out: Vec<i64> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut folders = 0u64;
+    for &id in entry_ids {
+        let row: Option<(bool, i64)> = conn
+            .query_row("SELECT is_folder, disk_id FROM entries WHERE id = ?1", params![id], |r| {
+                Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)?))
+            })
+            .optional()?;
+        let Some((is_folder, disk_id)) = row else { continue };
+        if !is_folder {
+            if seen.insert(id) {
+                out.push(id);
+            }
+            continue;
+        }
+        folders += 1;
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE sub(id, is_folder) AS (
+               SELECT id, is_folder FROM entries WHERE id = ?1
+               UNION ALL
+               SELECT e.id, e.is_folder FROM entries e JOIN sub s ON e.parent_id = s.id
+                WHERE e.disk_id = ?2
+             )
+             SELECT id FROM sub WHERE is_folder = 0",
+        )?;
+        let ids = stmt.query_map(params![id, disk_id], |r| r.get::<_, i64>(0))?;
+        for fid in ids {
+            let fid = fid?;
+            if seen.insert(fid) {
+                out.push(fid);
+            }
+        }
+    }
+    Ok((out, folders))
+}
+
+/// Agrupa los archivos elegidos por disco (online primero). Las carpetas elegidas se
+/// EXPANDEN a sus archivos descendientes (`skipped_folders` = cuántas se expandieron).
 pub fn gather_plan(conn: &Connection, entry_ids: &[i64]) -> DbResult<GatherPlan> {
     use std::collections::HashMap;
-    if entry_ids.is_empty() {
+    let (file_ids, expanded_folders) = expand_to_file_ids(conn, entry_ids)?;
+    if file_ids.is_empty() {
         return Ok(GatherPlan { groups: Vec::new(), total_files: 0, total_bytes: 0, skipped_folders: 0 });
     }
-    let ph = entry_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let ph = file_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT e.id, e.is_folder, e.size_logical, e.name, e.disk_id, d.name, d.is_online \
+        "SELECT e.id, e.size_logical, e.name, e.disk_id, d.name, d.is_online \
          FROM entries e JOIN disks d ON d.id = e.disk_id WHERE e.id IN ({ph})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<(i64, bool, i64, String, i64, String, bool)> = stmt
-        .query_map(params_from_iter(entry_ids.iter()), |r| {
+    let rows: Vec<(i64, i64, String, i64, String, bool)> = stmt
+        .query_map(params_from_iter(file_ids.iter()), |r| {
             Ok((
                 r.get(0)?,
-                r.get::<_, i64>(1)? != 0,
+                r.get(1)?,
                 r.get(2)?,
                 r.get(3)?,
                 r.get(4)?,
-                r.get(5)?,
-                r.get::<_, i64>(6)? != 0,
+                r.get::<_, i64>(5)? != 0,
             ))
         })?
         .collect::<Result<_, _>>()?;
 
     let mut by_disk: HashMap<i64, GatherGroup> = HashMap::new();
     let mut order: Vec<i64> = Vec::new();
-    let mut skipped_folders = 0u64;
     let mut total_files = 0u64;
     let mut total_bytes = 0i64;
 
-    for (id, is_folder, size, name, disk_id, disk_name, is_online) in rows {
-        if is_folder {
-            skipped_folders += 1;
-            continue;
-        }
+    for (id, size, name, disk_id, disk_name, is_online) in rows {
         let path = entry_path(conn, id)?;
         let g = by_disk.entry(disk_id).or_insert_with(|| {
             order.push(disk_id);
@@ -2193,7 +2230,7 @@ pub fn gather_plan(conn: &Connection, entry_ids: &[i64]) -> DbResult<GatherPlan>
     // Online primero, después por nombre de disco.
     groups.sort_by(|a, b| b.is_online.cmp(&a.is_online).then(a.disk_name.cmp(&b.disk_name)));
 
-    Ok(GatherPlan { groups, total_files, total_bytes, skipped_folders })
+    Ok(GatherPlan { groups, total_files, total_bytes, skipped_folders: expanded_folders })
 }
 
 #[cfg(test)]
@@ -3037,11 +3074,14 @@ mod tests {
             .collect();
 
         let plan = gather_plan(&conn, &ids).unwrap();
-        assert_eq!(plan.total_files, 2, "dos archivos C0001.MP4 (uno por disco)");
-        assert_eq!(plan.skipped_folders, 2, "las dos carpetas CLIP se ignoran");
+        // Cada CLIP se expande a {C0001.MP4, B-ROLL.MOV}; + el C0001.MP4 explícito (dedup)
+        // → 2 archivos por disco × 2 discos = 4.
+        assert_eq!(plan.total_files, 4, "carpetas expandidas a sus archivos");
+        assert_eq!(plan.skipped_folders, 2, "dos carpetas CLIP expandidas");
         assert_eq!(plan.groups.len(), 2, "un grupo por disco");
+        assert_eq!(plan.groups[0].total, 2, "dos archivos por disco");
         // El path incluye el nombre del disco.
         let any = &plan.groups[0].files[0];
-        assert!(any.path.contains("C0001.MP4"));
+        assert!(any.path.contains(".MP4") || any.path.contains(".MOV"));
     }
 }

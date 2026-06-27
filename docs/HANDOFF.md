@@ -303,7 +303,9 @@ M9 (conector seguro — empezar por malla Tailscale + `GET /v1/file` read-only a
       cuando hay selección): plan por disco, elegir destino, copiar grupo a grupo, "Actualizar discos"
       para detectar el que conectás, marca hechos (reanudable en sesión). i18n gather.* ES/EN.
       Test `gather_plan_groups_files_by_disk` (71 cargo tests; tsc limpio).
-      **Follow-up D-folders:** las carpetas seleccionadas se omiten; falta expandirlas a sus archivos.
+      ✅ **D-folders HECHO:** `expand_to_file_ids` (CTE recursiva) expande las carpetas elegidas a
+      sus archivos descendientes (dedup); `gather_plan` lo usa primero. `skipped_folders` ahora =
+      carpetas expandidas. Test actualizado (4 archivos de 2 CLIP expandidos).
 
 ### Bloque E — Cloud storage
 - [ ] **E1. Cloud Fase 1**: carpeta sincronizada (iCloud/Dropbox/Drive) como "disco cloud" +

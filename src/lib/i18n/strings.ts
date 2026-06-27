@@ -179,7 +179,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     // ── Reunir multi-disco (D) ──
     "gather.title": "Reunir archivos",
     "gather.summary": "{files} archivos · {bytes} · {disks} discos",
-    "gather.skippedFolders": "{n} carpetas omitidas",
+    "gather.skippedFolders": "{n} carpetas expandidas",
     "gather.refresh": "Actualizar discos",
     "gather.pickDest": "Elegí la carpeta destino",
     "gather.noDest": "Sin carpeta destino elegida",
@@ -595,7 +595,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     // ── Multi-disk gather (D) ──
     "gather.title": "Gather files",
     "gather.summary": "{files} files · {bytes} · {disks} disks",
-    "gather.skippedFolders": "{n} folders skipped",
+    "gather.skippedFolders": "{n} folders expanded",
     "gather.refresh": "Refresh disks",
     "gather.pickDest": "Choose the destination folder",
     "gather.noDest": "No destination folder chosen",

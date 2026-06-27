@@ -43,6 +43,17 @@ describe("parseNaturalQuery", () => {
     expect(concept).toBe("perros");
     expect(hasStructured(filters)).toBe(false);
   });
+
+  it("detecta idioma hablado y lo saca del concepto", () => {
+    const a = parseNaturalQuery("videos en español de una pelea");
+    expect(a.lang).toBe("es");
+    expect(a.concept).toBe("pelea");
+    const b = parseNaturalQuery("clips in english about dogs");
+    expect(b.lang).toBe("en");
+    const c = parseNaturalQuery("gente en la playa"); // "en" preposicional, NO idioma
+    expect(c.lang).toBeUndefined();
+    expect(c.concept).toBe("gente en la playa");
+  });
 });
 
 describe("applyNLFilters", () => {

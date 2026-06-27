@@ -417,9 +417,9 @@ export const api = {
     invoke<DupGroup[]>("ai_visual_duplicates", { threshold, minSize, limit }),
   // Fase 4 — transcribe el audio de un disco montado (Whisper) e indexa para FTS
   aiTranscribeDisk: (diskId: number) => invoke<number>("ai_transcribe_disk", { diskId }),
-  // Fase 4 — busca en las transcripciones (lo que se DICE)
-  aiSearchTranscripts: (query: string, limit?: number) =>
-    invoke<SemanticItem[]>("ai_search_transcripts", { query, limit }),
+  // Fase 4 — busca en las transcripciones (lo que se DICE). `lang` filtra por idioma.
+  aiSearchTranscripts: (query: string, limit?: number, lang?: string) =>
+    invoke<SemanticItem[]>("ai_search_transcripts", { query, limit, lang }),
 };
 
 export interface AiStatus {

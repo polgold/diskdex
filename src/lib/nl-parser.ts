@@ -31,6 +31,8 @@ const FILLERS = new Set([
 export interface NLQuery {
   concept: string;
   filters: SearchFilters;
+  /** Idioma hablado pedido ("en español") → filtra transcripciones (Fase 4). */
+  lang?: string;
 }
 
 function addCategory(filters: SearchFilters, key: string) {
@@ -43,6 +45,7 @@ function addCategory(filters: SearchFilters, key: string) {
 export function parseNaturalQuery(input: string): NLQuery {
   const filters: SearchFilters = { text: "", exts: [], tags: [] };
   const year = new Date().getFullYear();
+  let lang: string | undefined;
   let s = ` ${input.toLowerCase()} `;
 
   // ── Tamaño con comparador ──
@@ -118,13 +121,31 @@ export function parseNaturalQuery(input: string): NLQuery {
     return " ";
   });
 
+  // ── Idioma hablado ("en español", "in english") → filtra transcripciones ──
+  // Requiere "en/in/hablado en/spoken in" antes del idioma para no comerse
+  // frases como "en la playa".
+  const langs: [RegExp, string][] = [
+    [/\b(?:en|hablado en|in|spoken in)\s+(?:espa[ñn]ol|castellano|spanish)\b/g, "es"],
+    [/\b(?:en|hablado en|in|spoken in)\s+(?:ingl[ée]s|english)\b/g, "en"],
+    [/\b(?:en|hablado en|in|spoken in)\s+(?:portugu[ée]s|portuguese)\b/g, "pt"],
+    [/\b(?:en|hablado en|in|spoken in)\s+(?:franc[ée]s|french)\b/g, "fr"],
+    [/\b(?:en|hablado en|in|spoken in)\s+(?:italiano|italian)\b/g, "it"],
+    [/\b(?:en|hablado en|in|spoken in)\s+(?:alem[áa]n|german)\b/g, "de"],
+  ];
+  for (const [re, code] of langs) {
+    s = s.replace(re, () => {
+      if (!lang) lang = code;
+      return " ";
+    });
+  }
+
   // ── Concepto residual: recortar conectores de los extremos ──
   let toks = s.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
   while (toks.length && FILLERS.has(toks[0])) toks.shift();
   while (toks.length && FILLERS.has(toks[toks.length - 1])) toks.pop();
   const concept = toks.join(" ");
 
-  return { concept, filters };
+  return { concept, filters, lang };
 }
 
 function extOf(name: string): string {

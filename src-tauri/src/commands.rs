@@ -2384,11 +2384,13 @@ pub async fn ai_search_transcripts(
     state: tauri::State<'_, AppState>,
     query: String,
     limit: Option<i64>,
+    lang: Option<String>,
 ) -> Result<Vec<db::SemanticItem>, String> {
     let limit = limit.unwrap_or(200);
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
-    let hits = db::search_transcripts(&cat.conn, &query, limit).map_err(|e| e.to_string())?;
+    let hits = db::search_transcripts(&cat.conn, &query, limit, lang.as_deref())
+        .map_err(|e| e.to_string())?;
     let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
     let snippets: std::collections::HashMap<i64, String> = hits.into_iter().collect();
     let items = db::search_items_by_ids(&cat.conn, &ids).map_err(|e| e.to_string())?;
@@ -2412,6 +2414,7 @@ pub async fn ai_search_transcripts(
     _state: tauri::State<'_, AppState>,
     _query: String,
     _limit: Option<i64>,
+    _lang: Option<String>,
 ) -> Result<Vec<db::SemanticItem>, String> {
     Err("IA no compilada en este build (compilá con --features ai)".into())
 }

@@ -1653,25 +1653,43 @@ pub fn transcript_candidates(
 }
 
 /// Busca en las transcripciones (FTS) → (entry_id, snippet con el match resaltado…).
+/// `lang` (opcional, p.ej. "es") restringe al idioma detectado de la transcripción.
 /// Devuelve hasta `limit` resultados ordenados por relevancia.
 pub fn search_transcripts(
     conn: &Connection,
     query: &str,
     limit: i64,
+    lang: Option<&str>,
 ) -> DbResult<Vec<(i64, String)>> {
     let fts = match build_fts_query(query) {
         Some(f) => f,
         None => return Ok(Vec::new()),
     };
-    let mut stmt = conn.prepare(
-        "SELECT rowid, snippet(transcripts_fts, 0, '«', '»', '…', 12) \
-         FROM transcripts_fts WHERE transcripts_fts MATCH ?1 ORDER BY rank LIMIT ?2",
-    )?;
-    let rows = stmt
-        .query_map(params![fts, limit], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    let snip = "snippet(transcripts_fts, 0, '«', '»', '…', 12)";
+    let map = |r: &rusqlite::Row| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?));
+    let rows = if let Some(lang) = lang {
+        let sql = format!(
+            "SELECT rowid, {snip} FROM transcripts_fts \
+             WHERE transcripts_fts MATCH ?1 \
+               AND rowid IN (SELECT entry_id FROM transcripts WHERE lang = ?2) \
+             ORDER BY rank LIMIT ?3"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let v = stmt
+            .query_map(params![fts, lang, limit], map)?
+            .collect::<Result<Vec<_>, _>>()?;
+        v
+    } else {
+        let sql = format!(
+            "SELECT rowid, {snip} FROM transcripts_fts \
+             WHERE transcripts_fts MATCH ?1 ORDER BY rank LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let v = stmt
+            .query_map(params![fts, limit], map)?
+            .collect::<Result<Vec<_>, _>>()?;
+        v
+    };
     Ok(rows)
 }
 
@@ -2659,15 +2677,19 @@ mod tests {
         // Ya no es candidato.
         assert!(!transcript_candidates(&conn, disk_id, exts).unwrap().contains(&a));
         // Se encuentra por lo que se dice.
-        let hits = search_transcripts(&conn, "perros", 10).unwrap();
+        let hits = search_transcripts(&conn, "perros", 10, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, a);
         assert!(!hits[0].1.is_empty());
 
+        // Filtro por idioma: coincide con "es", no con "en".
+        assert_eq!(search_transcripts(&conn, "perros", 10, Some("es")).unwrap().len(), 1);
+        assert!(search_transcripts(&conn, "perros", 10, Some("en")).unwrap().is_empty());
+
         // Re-transcribir REEMPLAZA en el FTS (sin duplicar): perros ya no está, gatos sí.
         store_transcript(&conn, a, "whisper-base", Some("es"), "ahora habla de gatos", 124).unwrap();
-        assert!(search_transcripts(&conn, "perros", 10).unwrap().is_empty());
-        assert_eq!(search_transcripts(&conn, "gatos", 10).unwrap().len(), 1);
+        assert!(search_transcripts(&conn, "perros", 10, None).unwrap().is_empty());
+        assert_eq!(search_transcripts(&conn, "gatos", 10, None).unwrap().len(), 1);
         assert_eq!(count_transcripts(&conn).unwrap(), 1);
     }
 

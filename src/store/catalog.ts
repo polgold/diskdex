@@ -340,7 +340,7 @@ export const useCatalog = create<CatalogState>((set, get) => ({
         if (hasConcept && get().aiAvailable) {
           const [sem, spoken] = await Promise.all([
             api.aiSearch(nl.concept, get().semanticThreshold, 2000),
-            api.aiSearchTranscripts(nl.concept, 300).catch(() => []),
+            api.aiSearchTranscripts(nl.concept, 300, nl.lang).catch(() => []),
           ]);
           const visual = applyNLFilters(sem, nl.filters);
           const spokenF = applyNLFilters(spoken, nl.filters);
@@ -382,7 +382,7 @@ export const useCatalog = create<CatalogState>((set, get) => ({
           // para que el post-filtro estructurado no se quede corto.
           const [sem, spoken] = await Promise.all([
             api.aiSearch(nl.concept, get().semanticThreshold, 2000),
-            api.aiSearchTranscripts(nl.concept, 300).catch(() => []),
+            api.aiSearchTranscripts(nl.concept, 300, nl.lang).catch(() => []),
           ]);
           const visual = applyNLFilters(sem, nl.filters);
           const spokenF = applyNLFilters(spoken, nl.filters);

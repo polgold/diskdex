@@ -58,6 +58,13 @@ name = "embed_probe"
 path = "src/bin/embed_probe.rs"
 required-features = ["ai"]
 
+# Spike IA Fase 4 (Whisper): transcribe el audio de un archivo (ffmpeg → mel →
+# whisper-base multilingüe) e imprime el texto. De-riesga la transcripción.
+[[bin]]
+name = "whisper_probe"
+path = "src/bin/whisper_probe.rs"
+required-features = ["ai"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

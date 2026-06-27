@@ -17,6 +17,21 @@ export interface SearchFilters {
   modified_before?: number;
   kind?: "file" | "folder";
   place?: string;
+  light?: string;
+}
+
+/** Traduce términos de luz (ES/EN) al keyword guardado en light_phase. */
+function normalizeLight(v: string): string {
+  const s = v.trim().toLowerCase();
+  const map: Record<string, string> = {
+    atardecer: "sunset", atardeceres: "sunset", ocaso: "sunset", sunset: "sunset",
+    amanecer: "sunrise", alba: "sunrise", aurora: "sunrise", sunrise: "sunrise",
+    dorada: "golden", golden: "golden", goldenhour: "golden",
+    crepusculo: "twilight", "crepúsculo": "twilight", twilight: "twilight", azul: "bluehour", bluehour: "bluehour",
+    noche: "night", night: "night", nocturno: "night",
+    dia: "day", "día": "day", day: "day",
+  };
+  return map[s] ?? s;
 }
 
 /** Categorías de tipo de archivo (estilo Dropbox) → sets de extensiones. */
@@ -136,6 +151,13 @@ export function parseQuery(input: string): SearchFilters {
     if (m) {
       const v = m[1].trim();
       if (v) f.place = f.place ? `${f.place} ${v}` : v;
+      continue;
+    }
+
+    // light:atardecer | luz:sunset | atardecer  → fase de luz por posición solar (C2)
+    m = /^(?:light|luz):(.+)$/i.exec(lower);
+    if (m) {
+      f.light = normalizeLight(m[1]);
       continue;
     }
 

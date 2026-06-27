@@ -41,6 +41,7 @@ pub struct EntryMeta {
     pub captured_at: Option<i64>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    pub light_phase: Option<String>,
 }
 
 impl EntryMeta {
@@ -51,13 +52,14 @@ impl EntryMeta {
             && self.captured_at.is_none()
             && self.camera_make.is_none()
             && self.camera_model.is_none()
+            && self.light_phase.is_none()
     }
 }
 
 /// Lee la metadata enriquecida de una entrada (columnas A2/A2-meta).
 pub fn get_entry_meta(conn: &Connection, entry_id: i64) -> DbResult<EntryMeta> {
     conn.query_row(
-        "SELECT content_hash, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model \
+        "SELECT content_hash, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, light_phase \
          FROM entries WHERE id = ?1",
         params![entry_id],
         |r| {
@@ -69,6 +71,7 @@ pub fn get_entry_meta(conn: &Connection, entry_id: i64) -> DbResult<EntryMeta> {
                 captured_at: r.get(4)?,
                 camera_make: r.get(5)?,
                 camera_model: r.get(6)?,
+                light_phase: r.get(7)?,
             })
         },
     )
@@ -259,6 +262,7 @@ fn apply_migrations(conn: &Connection) -> DbResult<()> {
         "ALTER TABLE entries ADD COLUMN captured_at  INTEGER",
         "ALTER TABLE entries ADD COLUMN camera_make  TEXT",
         "ALTER TABLE entries ADD COLUMN camera_model TEXT",
+        "ALTER TABLE entries ADD COLUMN light_phase  TEXT",
         "ALTER TABLE disks   ADD COLUMN cloud_provider TEXT",
         "ALTER TABLE disks   ADD COLUMN cloud_root     TEXT",
     ];
@@ -493,6 +497,7 @@ struct PreservedEnrichment {
     captured_at: Option<i64>,
     camera_make: Option<String>,
     camera_model: Option<String>,
+    light_phase: Option<String>,
 }
 
 /// Rutas relativas (con `/`) de cada entrada de un `DcmfDisk` (raíz = ""). Asume
@@ -535,19 +540,19 @@ fn snapshot_enrichment(
         }
         let mut stmt = conn.prepare(
             "WITH RECURSIVE sub(id, name, is_folder, size_logical, modified_at, content_hash, hashed_at,
-                                gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, rel) AS (
+                                gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, light_phase, rel) AS (
                SELECT id, name, is_folder, size_logical, modified_at, content_hash, hashed_at,
-                      gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, ''
+                      gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, light_phase, ''
                  FROM entries WHERE disk_id = ?1 AND parent_id IS NULL
                UNION ALL
                SELECT e.id, e.name, e.is_folder, e.size_logical, e.modified_at, e.content_hash, e.hashed_at,
-                      e.gps_lat, e.gps_lon, e.gps_place, e.captured_at, e.camera_make, e.camera_model,
+                      e.gps_lat, e.gps_lon, e.gps_place, e.captured_at, e.camera_make, e.camera_model, e.light_phase,
                       CASE WHEN s.rel = '' THEN e.name ELSE s.rel || '/' || e.name END
                  FROM entries e JOIN sub s ON e.parent_id = s.id
                 WHERE e.disk_id = ?1
              )
              SELECT rel, size_logical, modified_at, content_hash, hashed_at,
-                    gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model
+                    gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, light_phase
              FROM sub
              WHERE is_folder = 0 AND (content_hash IS NOT NULL OR gps_lat IS NOT NULL OR gps_place IS NOT NULL)",
         )?;
@@ -565,6 +570,7 @@ fn snapshot_enrichment(
                     captured_at: r.get(8)?,
                     camera_make: r.get(9)?,
                     camera_model: r.get(10)?,
+                    light_phase: r.get(11)?,
                 },
             ))
         })?;
@@ -662,8 +668,8 @@ pub fn ingest_scanned(
         let mut stmt = tx.prepare(
             "INSERT INTO entries
              (disk_id, parent_id, name, is_folder, size_logical, size_physical, created_at, modified_at, ext,
-              content_hash, hashed_at, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              content_hash, hashed_at, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, light_phase)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )?;
         let now = now_secs();
         for (k, e) in disk.entries.iter().enumerate() {
@@ -702,6 +708,9 @@ pub fn ingest_scanned(
             let camera_model = fresh
                 .and_then(|x| x.camera_model.clone())
                 .or_else(|| snap.and_then(|s| s.camera_model.clone()));
+            let light_phase = fresh
+                .and_then(|x| x.light_phase.clone())
+                .or_else(|| snap.and_then(|s| s.light_phase.clone()));
             stmt.execute(params![
                 disk_id,
                 parent_id,
@@ -720,6 +729,7 @@ pub fn ingest_scanned(
                 captured_at,
                 camera_make,
                 camera_model,
+                light_phase,
             ])?;
             if k == 0 {
                 base = tx.last_insert_rowid();
@@ -1580,6 +1590,7 @@ pub struct SearchFilters {
     pub kind: Option<String>,       // "file" | "folder"
     pub disk_id: Option<i64>,       // limitar a un disco
     pub place: Option<String>,      // ubicación (gps_place LIKE), C1
+    pub light: Option<String>,      // fase de luz (light_phase LIKE): sunset/golden/night…, C2
 }
 
 impl SearchFilters {
@@ -1594,6 +1605,7 @@ impl SearchFilters {
             && self.kind.is_none()
             && self.disk_id.is_none()
             && self.place.as_ref().map_or(true, |p| p.trim().is_empty())
+            && self.light.as_ref().map_or(true, |p| p.trim().is_empty())
     }
 }
 
@@ -1661,6 +1673,11 @@ pub fn search_advanced(conn: &Connection, f: &SearchFilters, limit: i64) -> DbRe
         // Ubicación (C1): coincide con el nombre de lugar resuelto del GPS.
         clauses.push("e.gps_place LIKE ?".to_string());
         bind.push(Box::new(format!("%{p}%")));
+    }
+    if let Some(l) = f.light.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        // Fase de luz (C2): atardecer/golden/noche derivado de la posición solar.
+        clauses.push("e.light_phase LIKE ?".to_string());
+        bind.push(Box::new(format!("%{}%", l.to_lowercase())));
     }
 
     let from = if fts.is_some() {
@@ -2755,5 +2772,20 @@ mod tests {
         // Combinado con un filtro de tipo: sigue matcheando.
         let f2 = SearchFilters { place: Some("AR".into()), kind: Some("file".into()), ..Default::default() };
         assert_eq!(search_advanced(&conn, &f2, 50).unwrap().total, 2);
+    }
+
+    #[test]
+    fn search_by_light_filters_on_light_phase() {
+        let mut conn = open_in_memory().unwrap();
+        let disk = sample_disk();
+        let mut enr = vec![EntryEnrichment::default(); disk.entries.len()];
+        enr[2].light_phase = Some("golden dusk sunset".into()); // C0001.MP4 = atardecer
+        enr[3].light_phase = Some("day".into()); // B-ROLL.MOV = día
+        ingest_scanned(&mut conn, &disk, Some("U"), "ssd", None, "/Volumes/SF28", Some(&enr)).unwrap();
+
+        let f = SearchFilters { light: Some("sunset".into()), ..Default::default() };
+        let res = search_advanced(&conn, &f, 50).unwrap();
+        assert_eq!(res.total, 1);
+        assert_eq!(res.items[0].name, "C0001.MP4");
     }
 }

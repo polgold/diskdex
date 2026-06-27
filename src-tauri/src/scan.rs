@@ -270,6 +270,9 @@ pub struct EntryEnrichment {
     pub captured_at: Option<i64>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    /// Fase de luz (C2): palabras buscables (golden/sunset/night…) derivadas de
+    /// la posición del sol en (gps, captured_at). None si faltan esos datos.
+    pub light_phase: Option<String>,
 }
 
 /// Hash BLAKE3 (hex) del contenido de un archivo, leído en streaming (no carga el
@@ -391,6 +394,10 @@ pub fn enrich_entries(
                         // C1: resolver coordenadas → nombre de lugar (offline) para búsqueda.
                         if let (Some(lat), Some(lon)) = (loc.gps_lat, loc.gps_lon) {
                             out[k].gps_place = crate::geo::place_for(lat, lon);
+                            // C2: fase de luz (atardecer/golden/noche) por posición solar.
+                            if let Some(ts) = loc.captured_at {
+                                out[k].light_phase = crate::geo::light_phase(lat, lon, ts);
+                            }
                         }
                     }
                 }

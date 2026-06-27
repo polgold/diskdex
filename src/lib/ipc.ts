@@ -72,6 +72,7 @@ export interface EntryMeta {
   captured_at: number | null;
   camera_make: string | null;
   camera_model: string | null;
+  light_phase: string | null;
 }
 
 export interface ExtStat {

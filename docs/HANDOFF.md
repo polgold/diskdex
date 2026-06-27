@@ -271,7 +271,14 @@ M9 (conector seguro — empezar por malla Tailscale + `GET /v1/file` read-only a
       `entries.gps_place`. Búsqueda: token `place:`/`lugar:`/`ubicacion:` en el query-parser →
       `SearchFilters.place` → `gps_place LIKE` en search_advanced. Tests `geo::resolves_known_coordinates`
       (verifica Jujuy) + `search_by_place_filters_on_gps_place` (66 cargo tests; tsc limpio).
-- [ ] **C2. Posición solar** (efemérides desde GPS + hora) → flag atardecer/amanecer **sin ML**.
+- [x] **C2. Posición solar** (efemérides desde GPS + hora) → flag atardecer/amanecer **sin ML** —
+      ✅ HECHO (uncommitted). `geo::sun_elevation`/`geo::light_phase(lat,lon,unix)` (algoritmo J2000)
+      → keywords buscables (golden/sunset/dusk/sunrise/night/day). `enrich_entries` lo computa cuando
+      hay GPS + `captured_at` → columna nueva `entries.light_phase` (migración + ingest + snapshot/
+      preserve + EntryMeta). Búsqueda: token `light:`/`luz:` con traducción ES (atardecer→sunset…) en
+      el query-parser → `SearchFilters.light` → `light_phase LIKE`. Inspector muestra la luz.
+      CAVEAT: asume `captured_at` en UTC (si la cámara guardó hora local, puede correrse). Tests
+      `light_phase_day_and_night`/`light_phase_detects_a_sunset` + `search_by_light_filters_on_light_phase`.
 - [ ] **C3. NL → query vía Claude API**: frase + esquema → tokens de búsqueda (existentes +
       `place:`/`camera:`/`light:sunset`), ejecución local. Solo viaja el texto de la consulta.
 

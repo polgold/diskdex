@@ -95,6 +95,19 @@ export function Inspector() {
   );
 }
 
+/** Traduce los keywords de light_phase (C2) a una etiqueta legible. */
+function lightLabel(phase: string | null, t: (k: string) => string): string | null {
+  if (!phase) return null;
+  const p = phase.toLowerCase();
+  const golden = p.includes("golden") ? ` ${t("inspector.lightGolden")}` : "";
+  if (p.includes("sunset")) return t("inspector.lightSunset") + golden;
+  if (p.includes("sunrise")) return t("inspector.lightSunrise") + golden;
+  if (p.includes("night")) return t("inspector.lightNight");
+  if (p.includes("day")) return t("inspector.lightDay");
+  if (p.includes("twilight")) return t("inspector.lightTwilight");
+  return null;
+}
+
 /** A2-meta: GPS / cámara / fecha de captura / hash, si el escaneo los extrajo. */
 function MetaInfo({ entry }: { entry: EntryRow }) {
   const t = useT();
@@ -114,12 +127,19 @@ function MetaInfo({ entry }: { entry: EntryRow }) {
 
   if (!meta) return null;
   const hasAny =
-    meta.content_hash || meta.gps_lat != null || meta.gps_place || meta.captured_at != null || meta.camera_make || meta.camera_model;
+    meta.content_hash ||
+    meta.gps_lat != null ||
+    meta.gps_place ||
+    meta.captured_at != null ||
+    meta.camera_make ||
+    meta.camera_model ||
+    meta.light_phase;
   if (!hasAny) return null;
 
   const camera = [meta.camera_make, meta.camera_model].filter(Boolean).join(" ");
   const coords =
     meta.gps_lat != null && meta.gps_lon != null ? `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}` : null;
+  const light = lightLabel(meta.light_phase, t);
 
   return (
     <div className="mt-4 rounded-lg border border-border bg-neutral-900/40 p-2.5">
@@ -131,6 +151,7 @@ function MetaInfo({ entry }: { entry: EntryRow }) {
         {coords && <Field label={t("inspector.coords")} value={coords} mono />}
         {camera && <Field label={t("inspector.camera")} value={camera} />}
         {meta.captured_at != null && <Field label={t("inspector.captured")} value={formatDate(meta.captured_at)} mono />}
+        {light && <Field label={t("inspector.light")} value={light} />}
         {meta.content_hash && <Field label={t("inspector.hash")} value={`${meta.content_hash.slice(0, 16)}…`} mono />}
       </dl>
     </div>

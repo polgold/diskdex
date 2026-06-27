@@ -386,15 +386,38 @@ pub fn resolve_fs_path(state: tauri::State<'_, AppState>, entry_id: i64) -> Resu
     Ok(resolve_real_path(&cat.conn, entry_id)?.to_string_lossy().to_string())
 }
 
-/// Extensiones de imagen para las que cacheamos thumbnails al escanear (Fase A).
+/// Extensiones de imagen estándar (decodificadas por el crate `image`).
 const THUMB_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff"];
+/// RAW de cámara — en macOS se decodifican con `sips` (ImageIO de Apple).
+const RAW_EXTS: &[&str] = &[
+    "dng", "arw", "cr2", "cr3", "crw", "nef", "nrw", "raf", "orf", "rw2", "pef", "srw", "3fr",
+    "iiq", "dcr", "mrw", "mos", "erf", "rwl",
+];
 /// Lado máximo del thumbnail cacheado. Compacto pero nítido en el inspector/grilla.
 const THUMB_CACHE_MAX: u32 = 320;
 
+/// Lista combinada (imagen estándar + RAW) para buscar pendientes de thumbnail.
+fn thumb_exts() -> Vec<&'static str> {
+    THUMB_EXTS.iter().chain(RAW_EXTS.iter()).copied().collect()
+}
+
 /// Renderiza un PNG de thumbnail desde una ruta real. Devuelve (bytes, w, h).
+/// Despacha RAW de cámara a `sips` (macOS) y el resto al crate `image`.
+fn render_image_thumb(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if RAW_EXTS.contains(&ext.as_str()) {
+        render_raw_thumbnail(path, max)
+    } else {
+        render_thumbnail_png(path, max)
+    }
+}
+
 fn render_thumbnail_png(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u32, u32), String> {
     let img = image::open(path)
-        .map_err(|e| format!("no se pudo generar preview (¿formato RAW/no soportado?): {e}"))?;
+        .map_err(|e| format!("no se pudo generar preview (formato no soportado): {e}"))?;
     let thumb = img.thumbnail(max, max);
     let (w, h) = (thumb.width(), thumb.height());
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -402,6 +425,35 @@ fn render_thumbnail_png(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u3
         .write_to(&mut buf, image::ImageFormat::Png)
         .map_err(|e| e.to_string())?;
     Ok((buf.into_inner(), w, h))
+}
+
+/// Decodifica un RAW de cámara a PNG usando `sips` (ImageIO de macOS), que
+/// soporta ARW/DNG/CR2/CR3/NEF/RAF/ORF/RW2/etc. de fábrica.
+#[cfg(target_os = "macos")]
+fn render_raw_thumbnail(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("diskdex_raw_{}_{}.png", std::process::id(), n));
+    let out = std::process::Command::new("sips")
+        .args(["-Z", &max.to_string(), "-s", "format", "png"])
+        .arg(path)
+        .arg("--out")
+        .arg(&tmp)
+        .output()
+        .map_err(|e| format!("no se pudo ejecutar sips: {e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("sips no pudo decodificar el RAW".into());
+    }
+    let bytes = std::fs::read(&tmp).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok((bytes, 0, 0))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn render_raw_thumbnail(_path: &std::path::Path, _max: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    Err("preview de RAW no disponible en esta plataforma".into())
 }
 
 /// Thumbnail/preview de una imagen. Primero busca en el cache del catálogo (lo
@@ -431,7 +483,7 @@ pub fn get_thumbnail(
         resolve_real_path(&cat.conn, entry_id)?
     };
     let max = max.unwrap_or(THUMB_CACHE_MAX).clamp(32, 1024);
-    let (png, w, h) = render_thumbnail_png(&path, max)?;
+    let (png, w, h) = render_image_thumb(&path, max)?;
     {
         let guard = state.catalog.lock().unwrap();
         if let Some(cat) = guard.as_ref() {
@@ -461,7 +513,7 @@ pub fn cache_disk_thumbnails(
     let jobs: Vec<(i64, PathBuf)> = {
         let guard = state.catalog.lock().unwrap();
         let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
-        let ids = db::image_entries_without_thumb(&cat.conn, disk_id, THUMB_EXTS)
+        let ids = db::image_entries_without_thumb(&cat.conn, disk_id, &thumb_exts())
             .map_err(|e| e.to_string())?;
         let mut v = Vec::with_capacity(ids.len());
         for id in ids {
@@ -480,7 +532,7 @@ pub fn cache_disk_thumbnails(
         emit_index(&app, "thumbnails", 0, total);
     }
     for (id, path) in jobs {
-        match render_thumbnail_png(&path, THUMB_CACHE_MAX) {
+        match render_image_thumb(&path, THUMB_CACHE_MAX) {
             Ok((png, w, h)) => {
                 let guard = state.catalog.lock().unwrap();
                 match guard.as_ref() {

@@ -1,9 +1,101 @@
 import { useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronRight, Folder, File as FileIcon, Search, Loader2 } from "lucide-react";
+import {
+  ChevronRight,
+  Folder,
+  File as FileIcon,
+  Search,
+  Loader2,
+  FolderSearch,
+  ExternalLink,
+  Copy,
+} from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatDate, formatCount } from "../lib/format";
 import { api, type SearchItem } from "../lib/ipc";
+import { revealOriginal, openOriginal, copyText } from "../lib/actions";
+
+interface MenuState {
+  x: number;
+  y: number;
+  id: number;
+  isFolder: boolean;
+}
+
+/** Menú contextual propio (clic derecho) sobre un ítem. */
+function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) {
+  const setError = useCatalog((s) => s.setError);
+
+  useEffect(() => {
+    const close = () => onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  async function run(fn: () => Promise<void>) {
+    onClose();
+    try {
+      await fn();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  const items = [
+    {
+      label: "Revelar en Finder",
+      icon: <FolderSearch className="h-3.5 w-3.5" />,
+      fn: () => revealOriginal(menu.id),
+    },
+    ...(!menu.isFolder
+      ? [
+          {
+            label: "Abrir en el visor del sistema",
+            icon: <ExternalLink className="h-3.5 w-3.5" />,
+            fn: () => openOriginal(menu.id),
+          },
+        ]
+      : []),
+    {
+      label: "Copiar ruta",
+      icon: <Copy className="h-3.5 w-3.5" />,
+      fn: async () => {
+        const p = await api.entryPath(menu.id);
+        await copyText(p);
+      },
+    },
+  ];
+
+  // Evitar que el menú se salga de la ventana.
+  const left = Math.min(menu.x, window.innerWidth - 220);
+  const top = Math.min(menu.y, window.innerHeight - 16 - items.length * 32);
+
+  return (
+    <div
+      className="fixed z-[100] min-w-52 overflow-hidden rounded-lg border border-border bg-popover py-1 shadow-pop animate-zoom-in"
+      style={{ left, top }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {items.map((it) => (
+        <button
+          key={it.label}
+          onClick={() => run(it.fn)}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-neutral-200 transition-colors hover:bg-accent"
+        >
+          {it.icon}
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function ContentTable() {
   const mode = useCatalog((s) => s.mode);
@@ -41,7 +133,9 @@ function BrowseTable() {
   const selectEntry = useCatalog((s) => s.selectEntry);
   const openFolder = useCatalog((s) => s.openFolder);
   const breadcrumb = useCatalog((s) => s.breadcrumb);
+  const setError = useCatalog((s) => s.setError);
   const parentRef = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState<MenuState | null>(null);
 
   const rv = useVirtualizer({
     count: entries.length,
@@ -90,6 +184,7 @@ function BrowseTable() {
 
   return (
     <div className="flex h-full flex-col">
+      {menu && <RowContextMenu menu={menu} onClose={() => setMenu(null)} />}
       <Breadcrumb />
       {breadcrumb.length === 1 && selectedDiskId != null && <DiskMetaBar diskId={selectedDiskId} />}
       <HeaderRow
@@ -110,7 +205,15 @@ function BrowseTable() {
               <div
                 key={e.id}
                 onClick={() => selectEntry(e.id)}
-                onDoubleClick={() => e.is_folder && openFolder(e)}
+                onDoubleClick={() => {
+                  if (e.is_folder) openFolder(e);
+                  else openOriginal(e.id).catch((err) => setError(String(err)));
+                }}
+                onContextMenu={(ev) => {
+                  ev.preventDefault();
+                  selectEntry(e.id);
+                  setMenu({ x: ev.clientX, y: ev.clientY, id: e.id, isFolder: e.is_folder });
+                }}
                 className={`absolute left-0 right-0 flex cursor-pointer items-center px-3 text-sm transition-colors duration-150 ${
                   selectedEntryId === e.id
                     ? "bg-primary/10 text-foreground shadow-[inset_2px_0_0_0_hsl(var(--primary))]"
@@ -152,7 +255,9 @@ function SearchTable() {
   const searching = useCatalog((s) => s.searching);
   const selectedEntryId = useCatalog((s) => s.selectedEntryId);
   const selectEntry = useCatalog((s) => s.selectEntry);
+  const setError = useCatalog((s) => s.setError);
   const parentRef = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState<MenuState | null>(null);
   const items: SearchItem[] = result?.items ?? [];
 
   const rv = useVirtualizer({
@@ -184,6 +289,7 @@ function SearchTable() {
 
   return (
     <div className="flex h-full flex-col">
+      {menu && <RowContextMenu menu={menu} onClose={() => setMenu(null)} />}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-neutral-800 px-3 py-1.5 text-xs text-neutral-400">
         <Search className="h-3.5 w-3.5" />
         {searching ? (
@@ -217,6 +323,15 @@ function SearchTable() {
               <div
                 key={it.id}
                 onClick={() => selectEntry(it.id)}
+                onDoubleClick={() => {
+                  const fn = it.is_folder ? revealOriginal : openOriginal;
+                  fn(it.id).catch((err) => setError(String(err)));
+                }}
+                onContextMenu={(ev) => {
+                  ev.preventDefault();
+                  selectEntry(it.id);
+                  setMenu({ x: ev.clientX, y: ev.clientY, id: it.id, isFolder: it.is_folder });
+                }}
                 className={`absolute left-0 right-0 flex cursor-pointer items-center px-3 text-sm transition-colors duration-150 ${
                   selectedEntryId === it.id
                     ? "bg-primary/10 text-foreground shadow-[inset_2px_0_0_0_hsl(var(--primary))]"

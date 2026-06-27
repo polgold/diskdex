@@ -25,6 +25,9 @@ import { TooltipProvider, Hint } from "@/components/ui/tooltip";
 function App() {
   const { disks, error, loading, lastImport, catalogPath, setImportResult, setError, setLoading } =
     useCatalog();
+  const openCatalogs = useCatalog((s) => s.openCatalogs);
+  // Sesión guardada (catálogos abiertos) leída una sola vez al montar.
+  const [savedSession] = useState(() => localStorage.getItem("diskdex:session"));
   const [status, setStatus] = useState<string>("");
   // Qué hacer DESPUÉS de escanear (cacheo pesado): el usuario decide. En discos
   // grandes/lentos (exFAT, NAS) conviene desactivar lo que no necesita.
@@ -49,8 +52,54 @@ function App() {
       onScanProgress((p) => setScanCount(p.count)),
       onIndexProgress((p) => setIndexProg(p.done >= p.total ? null : p)),
     ];
-    return () => unlisteners.forEach((p) => p.then((un) => un()));
+    // Desactivar el menú contextual del navegador (Inspect/Search…) salvo en
+    // campos de texto, donde el copiar/pegar nativo sí es útil.
+    const onContextMenu = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", onContextMenu);
+    return () => {
+      unlisteners.forEach((p) => p.then((un) => un()));
+      window.removeEventListener("contextmenu", onContextMenu);
+    };
   }, []);
+
+  // Reabrir el último catálogo usado al iniciar (en vez de crear uno nuevo).
+  useEffect(() => {
+    if (!savedSession) return;
+    let cancelled = false;
+    try {
+      const data = JSON.parse(savedSession) as { catalogPath?: string; openCatalogs?: string[] };
+      if (!data.catalogPath) return;
+      api
+        .openCatalog(data.catalogPath)
+        .then(() => {
+          if (cancelled) return;
+          (data.openCatalogs ?? []).forEach((p) => useCatalog.getState().addOpenCatalog(p));
+          useCatalog.getState().addOpenCatalog(data.catalogPath!);
+          useCatalog.setState({ catalogPath: data.catalogPath! });
+          return useCatalog.getState().refreshOnlineFromDisk();
+        })
+        .catch(() => localStorage.removeItem("diskdex:session"));
+    } catch {
+      localStorage.removeItem("diskdex:session");
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [savedSession]);
+
+  // Persistir la sesión (catálogos abiertos + activo) para reabrirla la próxima vez.
+  useEffect(() => {
+    if (catalogPath) {
+      localStorage.setItem(
+        "diskdex:session",
+        JSON.stringify({ catalogPath, openCatalogs: openCatalogs.map((c) => c.path) })
+      );
+    }
+  }, [catalogPath, openCatalogs]);
 
   async function ensureCatalog(): Promise<boolean> {
     if (catalogPathRef.current) return true;
@@ -69,8 +118,8 @@ function App() {
   async function handleImport() {
     setError(null);
     const dcmfPath = await open({
-      title: "Elegí el archivo .dcmf de DiskCatalogMaker",
-      filters: [{ name: "DiskCatalogMaker", extensions: ["dcmf", "dcmd"] }],
+      title: "Elegí un catálogo (.dcmf) para importar",
+      filters: [{ name: "Catálogo (.dcmf)", extensions: ["dcmf", "dcmd"] }],
       multiple: false,
       directory: false,
     });
@@ -395,9 +444,9 @@ function EmptyState() {
       <HardDrive className="h-12 w-12 text-neutral-700" />
       <h2 className="text-base font-medium text-neutral-300">No hay discos todavía</h2>
       <p className="max-w-md text-sm text-neutral-500">
-        Importá tu catálogo de DiskCatalogMaker (<span className="font-mono">.dcmf</span>), abrí un
-        catálogo <span className="font-mono">.dccat</span>, o <span className="text-sky-400">escaneá un
-        disco</span> conectado. Conectá un disco y aparece un aviso para escanearlo.
+<span className="text-sky-400">Escaneá un disco</span> conectado, abrí un catálogo{" "}
+        <span className="font-mono">.dccat</span> existente, o importá uno desde otro programa{" "}
+        (<span className="font-mono">.dcmf</span>). Cuando conectes un disco, aparece un aviso para escanearlo.
       </p>
     </div>
   );

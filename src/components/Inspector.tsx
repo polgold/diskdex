@@ -195,7 +195,12 @@ function CommentEditor({ entry }: { entry: EntryRow }) {
   );
 }
 
-const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff"]);
+const IMAGE_EXTS = new Set([
+  "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff",
+  // RAW de cámara (preview vía sips en macOS)
+  "dng", "arw", "cr2", "cr3", "crw", "nef", "nrw", "raf", "orf", "rw2", "pef", "srw", "3fr",
+  "iiq", "dcr", "mrw", "mos", "erf", "rwl",
+]);
 const VIDEO_EXTS = new Set([
   "mp4", "mov", "m4v", "avi", "mkv", "mxf", "mts", "m2ts", "wmv", "webm", "mpg", "mpeg", "3gp",
   "flv", "ogv", "vob", "m2v",

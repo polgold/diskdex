@@ -12,6 +12,15 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "common.searching": "buscando…",
     "common.saved": "guardado",
     "common.cancel": "Cancelar",
+    "settings.title": "Búsqueda con IA (Claude)",
+    "settings.nlClaude": "Interpretar búsquedas con Claude",
+    "settings.nlClaudeHelp": "Escribí en lenguaje natural (ej: \"clips de Jujuy del atardecer del 2023\") y Claude lo traduce a filtros de lugar/luz/fecha/tipo. Solo viaja el texto de la consulta, nunca tus archivos.",
+    "settings.apiKey": "API key de Anthropic",
+    "settings.apiKeyHelp": "Tu propia key (console.anthropic.com). Se guarda solo en este equipo.",
+    "settings.needKey": "Cargá tu API key primero",
+    "settings.show": "Mostrar",
+    "settings.hide": "Ocultar",
+    "settings.save": "Guardar",
     "common.close": "Cerrar",
     "common.files": "archivos",
     "common.folders": "carpetas",
@@ -307,6 +316,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
       "Muestrea frames de cada clip del disco (debe estar montado) para buscar el momento exacto dentro del video.",
     "ai.momentTip": "Momento del clip donde mejor coincide",
     "ai.similar": "Buscar similares (IA)",
+    "ai.transcribe": "Transcribir audio de «{disk}»",
+    "ai.transcribeHint":
+      "Transcribe con Whisper lo que se DICE en los videos/audios del disco (debe estar montado) para poder buscarlo. Lento (~tiempo real por archivo).",
 
     // ── ShareDialog ──
     "share.title": "Compartir (conector seguro)",
@@ -398,6 +410,15 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "common.searching": "searching…",
     "common.saved": "saved",
     "common.cancel": "Cancel",
+    "settings.title": "AI search (Claude)",
+    "settings.nlClaude": "Interpret searches with Claude",
+    "settings.nlClaudeHelp": "Type in natural language (e.g. \"sunset clips from Jujuy in 2023\") and Claude turns it into place/light/date/type filters. Only the query text is sent, never your files.",
+    "settings.apiKey": "Anthropic API key",
+    "settings.apiKeyHelp": "Your own key (console.anthropic.com). Stored only on this machine.",
+    "settings.needKey": "Add your API key first",
+    "settings.show": "Show",
+    "settings.hide": "Hide",
+    "settings.save": "Save",
     "common.close": "Close",
     "common.files": "files",
     "common.folders": "folders",
@@ -693,6 +714,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
       "Samples frames from each clip on the disk (must be mounted) to find the exact moment inside a video.",
     "ai.momentTip": "Moment in the clip where it best matches",
     "ai.similar": "Find similar (AI)",
+    "ai.transcribe": "Transcribe audio of “{disk}”",
+    "ai.transcribeHint":
+      "Uses Whisper to transcribe what's SAID in the disk's videos/audios (must be mounted) so you can search it. Slow (~realtime per file).",
 
     // ── ShareDialog ──
     "share.title": "Share (secure connector)",

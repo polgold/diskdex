@@ -310,6 +310,26 @@ pub fn extract_frame(path: &Path, at_secs: f64, max_w: u32) -> Result<Vec<u8>, S
     Ok(out.stdout)
 }
 
+/// Extrae el audio a PCM f32 mono 16 kHz (lo que espera Whisper). Requiere el
+/// archivo accesible (disco montado) + ffmpeg.
+pub fn extract_audio_pcm(path: &Path) -> Result<Vec<f32>, String> {
+    let bin = which("ffmpeg").ok_or("ffmpeg no está disponible")?;
+    let out = Command::new(bin)
+        .args(["-v", "quiet", "-i"])
+        .arg(path)
+        .args(["-ar", "16000", "-ac", "1", "-f", "f32le", "-"])
+        .output()
+        .map_err(|e| format!("no se pudo ejecutar ffmpeg: {e}"))?;
+    if !out.status.success() {
+        return Err("ffmpeg no pudo extraer el audio".into());
+    }
+    Ok(out
+        .stdout
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
 /// Timestamps (segundos) de una tira de `n` frames repartidos en la duración.
 /// Evita el segundo 0 (suele ser negro) y el final exacto.
 pub fn strip_timestamps(duration_ms: i64, n: usize) -> Vec<f64> {

@@ -199,6 +199,20 @@ CREATE TABLE IF NOT EXISTS embeddings (
 CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
 CREATE INDEX IF NOT EXISTS idx_embeddings_entry ON embeddings(entry_id, model);
 
+-- Transcripciones de audio (IA Fase 4, Whisper): el texto de lo que se DICE en
+-- videos/audios, para buscarlo full-text. `transcripts_fts` es un FTS5 standalone
+-- (rowid = entry_id, lo manejamos a mano) → independiente del FTS de nombres.
+CREATE TABLE IF NOT EXISTS transcripts (
+  entry_id   INTEGER PRIMARY KEY,
+  model      TEXT NOT NULL,
+  lang       TEXT,
+  text       TEXT NOT NULL,
+  created_at INTEGER
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5(
+  text, tokenize='unicode61 remove_diacritics 2'
+);
+
 -- Contenido indexado de archivos comprimidos (Fase B): ZIP/7z/RAR.
 CREATE TABLE IF NOT EXISTS archive_entries (
   id       INTEGER PRIMARY KEY,
@@ -1372,6 +1386,9 @@ pub struct SemanticItem {
     pub item: SearchItem,
     pub score: f32,
     pub frame_ts: Option<f64>,
+    /// Fragmento de la transcripción donde matchea (Fase 4); None para hits visuales.
+    #[serde(default)]
+    pub snippet: Option<String>,
 }
 
 fn vec_to_blob(v: &[f32]) -> Vec<u8> {
@@ -1574,6 +1591,88 @@ pub fn search_items_by_ids(conn: &Connection, ids: &[i64]) -> DbResult<Vec<Searc
         }
     }
     Ok(out)
+}
+
+// ---------- Transcripciones (IA Fase 4, Whisper) ----------
+
+/// Guarda (o reemplaza) la transcripción de una entrada y la reindexa en el FTS.
+pub fn store_transcript(
+    conn: &Connection,
+    entry_id: i64,
+    model: &str,
+    lang: Option<&str>,
+    text: &str,
+    created_at: i64,
+) -> DbResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO transcripts (entry_id, model, lang, text, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![entry_id, model, lang, text, created_at],
+    )?;
+    // FTS standalone (rowid = entry_id): borrar la fila vieja y reinsertar.
+    conn.execute("DELETE FROM transcripts_fts WHERE rowid = ?1", params![entry_id])?;
+    conn.execute(
+        "INSERT INTO transcripts_fts (rowid, text) VALUES (?1, ?2)",
+        params![entry_id, text],
+    )?;
+    Ok(())
+}
+
+/// Cantidad de entradas con transcripción.
+pub fn count_transcripts(conn: &Connection) -> DbResult<i64> {
+    conn.query_row("SELECT COUNT(*) FROM transcripts", [], |r| r.get(0))
+}
+
+/// Entradas de audio/video de un disco (por extensión) que aún no tienen transcripción.
+pub fn transcript_candidates(
+    conn: &Connection,
+    disk_id: i64,
+    exts: &[&str],
+) -> DbResult<Vec<i64>> {
+    if exts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = exts.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT e.id FROM entries e \
+         WHERE e.disk_id = ?1 AND e.is_folder = 0 \
+           AND lower(e.ext) IN ({placeholders}) \
+           AND NOT EXISTS (SELECT 1 FROM transcripts t WHERE t.entry_id = e.id)"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(disk_id)];
+    for e in exts {
+        p.push(Box::new(e.to_lowercase()));
+    }
+    let rows = stmt
+        .query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+            r.get::<_, i64>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Busca en las transcripciones (FTS) → (entry_id, snippet con el match resaltado…).
+/// Devuelve hasta `limit` resultados ordenados por relevancia.
+pub fn search_transcripts(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+) -> DbResult<Vec<(i64, String)>> {
+    let fts = match build_fts_query(query) {
+        Some(f) => f,
+        None => return Ok(Vec::new()),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT rowid, snippet(transcripts_fts, 0, '«', '»', '…', 12) \
+         FROM transcripts_fts WHERE transcripts_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![fts, limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 /// Filtros de búsqueda avanzada (M4). Todos opcionales; se combinan con AND.
@@ -2403,6 +2502,46 @@ mod tests {
         assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![b, a]);
         assert_eq!(items[0].name, "b.png");
         assert!(!items[0].disk_name.is_empty());
+    }
+
+    #[test]
+    fn transcripts_store_search_and_candidates() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk()]).unwrap();
+        conn.execute(
+            "INSERT INTO entries (disk_id, parent_id, name, is_folder, ext) \
+             VALUES ((SELECT id FROM disks LIMIT 1), NULL, 'clip.mp4', 0, 'mp4'), \
+                    ((SELECT id FROM disks LIMIT 1), NULL, 'nota.txt', 0, 'txt')",
+            [],
+        )
+        .unwrap();
+        let a: i64 = conn.query_row("SELECT id FROM entries WHERE name='clip.mp4'", [], |r| r.get(0)).unwrap();
+        let disk_id: i64 = conn.query_row("SELECT id FROM disks LIMIT 1", [], |r| r.get(0)).unwrap();
+        let exts = &["mp4", "mov", "mp3"];
+
+        // El mp4 nuevo es candidato; el txt no (no es A/V). (sample_disk ya trae
+        // sus propios .mp4/.mov, así que el candidato exacto no es solo `a`.)
+        let cands = transcript_candidates(&conn, disk_id, exts).unwrap();
+        assert!(cands.contains(&a));
+        assert!(!cands.contains(
+            &conn.query_row("SELECT id FROM entries WHERE name='nota.txt'", [], |r| r.get::<_, i64>(0)).unwrap()
+        ));
+
+        store_transcript(&conn, a, "whisper-base", Some("es"), "hola esto es una prueba de perros", 123).unwrap();
+        assert_eq!(count_transcripts(&conn).unwrap(), 1);
+        // Ya no es candidato.
+        assert!(!transcript_candidates(&conn, disk_id, exts).unwrap().contains(&a));
+        // Se encuentra por lo que se dice.
+        let hits = search_transcripts(&conn, "perros", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, a);
+        assert!(!hits[0].1.is_empty());
+
+        // Re-transcribir REEMPLAZA en el FTS (sin duplicar): perros ya no está, gatos sí.
+        store_transcript(&conn, a, "whisper-base", Some("es"), "ahora habla de gatos", 124).unwrap();
+        assert!(search_transcripts(&conn, "perros", 10).unwrap().is_empty());
+        assert_eq!(search_transcripts(&conn, "gatos", 10).unwrap().len(), 1);
+        assert_eq!(count_transcripts(&conn).unwrap(), 1);
     }
 
     #[test]

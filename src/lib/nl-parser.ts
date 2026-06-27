@@ -156,6 +156,8 @@ export function hasStructured(f: SearchFilters): boolean {
     f.max_size !== undefined ||
     f.modified_after !== undefined ||
     f.modified_before !== undefined ||
-    f.kind !== undefined
+    f.kind !== undefined ||
+    (f.place != null && f.place.trim() !== "") ||
+    (f.light != null && f.light.trim() !== "")
   );
 }

@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Search, X, Sparkles, RefreshCw, Loader2, Clapperboard } from "lucide-react";
+import { Search, X, Sparkles, RefreshCw, Loader2, Clapperboard, Mic, Settings as SettingsIcon } from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import { useT } from "../lib/i18n";
-import { api, onAiIndexProgress, type AiStatus, type AiIndexProgress } from "../lib/ipc";
+import { SettingsDialog } from "./SettingsDialog";
+import {
+  api,
+  onAiIndexProgress,
+  onAiTranscribeProgress,
+  type AiStatus,
+  type AiIndexProgress,
+} from "../lib/ipc";
 
 /** Buscador global (M3) con debounce y atajo ⌘/Ctrl+F. Incluye el modo de
  *  búsqueda semántica por contenido (IA Fase 1) cuando el build la trae. */
@@ -20,6 +27,8 @@ export function SearchBar() {
   const disks = useCatalog((s) => s.disks);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const nlClaude = useCatalog((s) => s.nlClaude);
+  const [showSettings, setShowSettings] = useState(false);
   const [aiAvail, setAiAvail] = useState(false);
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [prog, setProg] = useState<AiIndexProgress | null>(null);
@@ -62,11 +71,13 @@ export function SearchBar() {
       .catch(() => setAiAvail(false));
   }, [setAiAvailStore]);
 
-  // Progreso del indexado semántico (evento del backend).
+  // Progreso del indexado semántico y de la transcripción (eventos del backend).
   useEffect(() => {
-    const un = onAiIndexProgress(setProg);
+    const a = onAiIndexProgress(setProg);
+    const b = onAiTranscribeProgress(setProg);
     return () => {
-      void un.then((f) => f());
+      void a.then((f) => f());
+      void b.then((f) => f());
     };
   }, []);
 
@@ -107,6 +118,20 @@ export function SearchBar() {
       setIndexing(false);
       setProg(null);
       refreshStatus();
+      if (value.trim()) runSearch(value);
+    }
+  };
+
+  const doTranscribe = async () => {
+    if (selectedDiskId == null) return;
+    setIndexing(true);
+    try {
+      await api.aiTranscribeDisk(selectedDiskId);
+    } catch (e) {
+      useCatalog.getState().setError(String(e));
+    } finally {
+      setIndexing(false);
+      setProg(null);
       if (value.trim()) runSearch(value);
     }
   };
@@ -161,8 +186,17 @@ export function SearchBar() {
               <Sparkles className="h-3.5 w-3.5" />
             </button>
           )}
+          <button
+            onClick={() => setShowSettings(true)}
+            title={t("settings.title")}
+            className={`rounded p-0.5 ${nlClaude ? "text-violet-400 hover:text-violet-300" : "text-neutral-500 hover:text-neutral-200"}`}
+          >
+            <SettingsIcon className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
+
+      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
 
       {/* Panel IA: estado del índice, indexar, umbral. */}
       {aiAvail && semantic && (
@@ -209,16 +243,26 @@ export function SearchBar() {
             </div>
           )}
 
-          {/* Fase 2 — indexar contenido de VIDEOS del disco seleccionado (montado). */}
+          {/* Fase 2/4 — procesar el disco seleccionado (montado): frames de video y audio. */}
           {!indexing && selectedDisk && (
-            <button
-              onClick={doIndexVideos}
-              title={t("ai.indexVideosHint")}
-              className="mt-1.5 flex w-full items-center justify-center gap-1 rounded border border-violet-700/50 px-2 py-1 text-violet-300 hover:bg-violet-600/15"
-            >
-              <Clapperboard className="h-3 w-3" />
-              {t("ai.indexVideos", { disk: selectedDisk.name })}
-            </button>
+            <div className="mt-1.5 space-y-1">
+              <button
+                onClick={doIndexVideos}
+                title={t("ai.indexVideosHint")}
+                className="flex w-full items-center justify-center gap-1 rounded border border-violet-700/50 px-2 py-1 text-violet-300 hover:bg-violet-600/15"
+              >
+                <Clapperboard className="h-3 w-3" />
+                {t("ai.indexVideos", { disk: selectedDisk.name })}
+              </button>
+              <button
+                onClick={doTranscribe}
+                title={t("ai.transcribeHint")}
+                className="flex w-full items-center justify-center gap-1 rounded border border-violet-700/50 px-2 py-1 text-violet-300 hover:bg-violet-600/15"
+              >
+                <Mic className="h-3 w-3" />
+                {t("ai.transcribe", { disk: selectedDisk.name })}
+              </button>
+            </div>
           )}
 
           {needIndex && !indexing && (

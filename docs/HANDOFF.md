@@ -279,8 +279,18 @@ M9 (conector seguro — empezar por malla Tailscale + `GET /v1/file` read-only a
       el query-parser → `SearchFilters.light` → `light_phase LIKE`. Inspector muestra la luz.
       CAVEAT: asume `captured_at` en UTC (si la cámara guardó hora local, puede correrse). Tests
       `light_phase_day_and_night`/`light_phase_detects_a_sunset` + `search_by_light_filters_on_light_phase`.
-- [ ] **C3. NL → query vía Claude API**: frase + esquema → tokens de búsqueda (existentes +
-      `place:`/`camera:`/`light:sunset`), ejecución local. Solo viaja el texto de la consulta.
+- [x] **C3. NL → query vía Claude API** — ✅ HECHO (uncommitted, 100% FRONTEND, sin recompilar
+      Rust). Cada usuario pega su propia API key de Anthropic (Settings, guardada en localStorage de
+      este equipo). [`claude-nl.ts`](../src/lib/claude-nl.ts): `claudeNLToQuery(frase, key)` llama a
+      la API (modelo haiku, header `anthropic-dangerous-direct-browser-access`) y devuelve el mismo
+      shape `NLQuery` que el parser local → filtros (categories/place/light/fecha/tamaño/kind) +
+      concepto visual. Wireado en `store/catalog.ts` runSearch (rama Claude al inicio: si `nlClaude`
+      + key, interpreta con Claude; concepto→CLIP si hay modelo, si no FTS; degrada al parser local
+      si la API falla; token-guard contra races). UI: engranaje en SearchBar → [`SettingsDialog`](../src/components/SettingsDialog.tsx)
+      (key + toggle). i18n settings.* ES/EN. Solo viaja el TEXTO de la consulta, nunca el catálogo.
+      Tests `claude-nl.test.ts` (conversión JSON→filtros). tsc + 9 vitest verdes.
+      LIMITACIÓN: place/light no filtran resultados CLIP (SemanticItem no trae esas columnas); el
+      caso puro-filtros (sin concepto visual) va por searchAdvanced y sí los aplica.
 
 ### Bloque D — Plan de copia multi-disco
 - [ ] **D1. `GatherPlan`** + sesión guiada disco-por-disco **reanudable** ("conectá SF41 →

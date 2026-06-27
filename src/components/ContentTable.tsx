@@ -846,6 +846,14 @@ function SearchTable() {
                       ▶ {formatDuration((it as SemanticItem).frame_ts! * 1000)}
                     </span>
                   )}
+                  {(it as SemanticItem).snippet && (
+                    <span
+                      className="min-w-0 flex-1 truncate text-[11px] italic text-violet-300/80"
+                      title={(it as SemanticItem).snippet!}
+                    >
+                      💬 {(it as SemanticItem).snippet}
+                    </span>
+                  )}
                 </span>
                 <span
                   className="shrink-0 truncate text-xs text-neutral-400"

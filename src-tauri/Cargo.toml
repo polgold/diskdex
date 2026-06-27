@@ -20,7 +20,7 @@ tools = []
 # IA local (spike Fase 1): búsqueda semántica de imágenes/video con CLIP/SigLIP
 # multilingüe vía candle. Pesa el build (candle-transformers), por eso está
 # APAGADA por default. Uso: cargo run --features ai --bin embed_probe -- <catalog> <query...>
-ai = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub"]
+ai = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub", "dep:rand"]
 # BLAS de Apple (Accelerate) para inferencia rápida en CPU (Intel/ARM mac).
 # Uso junto a `ai`: cargo run --features ai,accel --profile release-ai --bin embed_probe
 accel = ["dep:accelerate-src", "candle-core/accelerate"]
@@ -128,6 +128,8 @@ tokenizers = { version = "0.21", optional = true }
 hf-hub = { version = "0.4", optional = true }
 # BLAS de Apple para candle (feature `accel`).
 accelerate-src = { version = "0.3", optional = true }
+# Sampling con temperatura en el fallback de Whisper (decodificación robusta).
+rand = { version = "0.9", optional = true }
 
 # statfs (tipo de FS + tamaños) para detectar volúmenes de red montados que
 # sysinfo no enumera (SMB/AFP/NFS) en /Volumes.

@@ -1233,6 +1233,7 @@ dependencies = [
  "hmac",
  "image",
  "libc",
+ "rand",
  "reverse_geocoder",
  "rusqlite",
  "serde",

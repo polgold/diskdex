@@ -384,6 +384,11 @@ export const api = {
   // Fase 5 — duplicados visuales (near-dups por contenido, mismo shape que findDuplicates)
   aiVisualDuplicates: (threshold?: number, minSize?: number, limit?: number) =>
     invoke<DupGroup[]>("ai_visual_duplicates", { threshold, minSize, limit }),
+  // Fase 4 — transcribe el audio de un disco montado (Whisper) e indexa para FTS
+  aiTranscribeDisk: (diskId: number) => invoke<number>("ai_transcribe_disk", { diskId }),
+  // Fase 4 — busca en las transcripciones (lo que se DICE)
+  aiSearchTranscripts: (query: string, limit?: number) =>
+    invoke<SemanticItem[]>("ai_search_transcripts", { query, limit }),
 };
 
 export interface AiStatus {
@@ -398,9 +403,11 @@ export interface SemanticItem extends SearchItem {
   score: number;
   /** Segundo del clip donde mejor matchea (null para imágenes). */
   frame_ts: number | null;
+  /** Fragmento de la transcripción donde matchea (Fase 4); null para hits visuales. */
+  snippet?: string | null;
 }
 
-// Progreso del indexado semántico. `total = -1` mientras carga el modelo.
+// Progreso del indexado semántico / transcripción. `total = -1` mientras carga el modelo.
 export interface AiIndexProgress {
   done: number;
   total: number;
@@ -408,6 +415,8 @@ export interface AiIndexProgress {
 }
 export const onAiIndexProgress = (cb: (p: AiIndexProgress) => void): Promise<UnlistenFn> =>
   listen<AiIndexProgress>("ai://index", (e) => cb(e.payload));
+export const onAiTranscribeProgress = (cb: (p: AiIndexProgress) => void): Promise<UnlistenFn> =>
+  listen<AiIndexProgress>("ai://transcribe", (e) => cb(e.payload));
 
 export interface AgentStatus {
   running: boolean;

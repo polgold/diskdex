@@ -138,6 +138,8 @@ pub fn run() {
             commands::ai_index_videos,
             commands::ai_similar,
             commands::ai_visual_duplicates,
+            commands::ai_transcribe_disk,
+            commands::ai_search_transcripts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

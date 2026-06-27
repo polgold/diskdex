@@ -7,7 +7,9 @@ import {
   type SearchResult,
 } from "../lib/ipc";
 import { parseQuery, hasCriteria, type SearchFilters } from "../lib/query-parser";
-import { parseNaturalQuery, applyNLFilters, hasStructured } from "../lib/nl-parser";
+import { parseNaturalQuery, applyNLFilters, hasStructured, type NLQuery } from "../lib/nl-parser";
+import { claudeNLToQuery } from "../lib/claude-nl";
+import { getClaudeKey, getNlClaudeEnabled, setNlClaudeEnabled } from "../lib/settings";
 
 export interface Crumb {
   id: number | null; // null = raíz del disco
@@ -65,6 +67,9 @@ interface CatalogState {
   // IA disponible en el build (feature `ai`) — la UI muestra/oculta lo semántico.
   aiAvailable: boolean;
   setAiAvailable: (b: boolean) => void;
+  // C3 — interpretar la búsqueda con Claude (cada usuario pone su API key).
+  nlClaude: boolean;
+  setNlClaude: (b: boolean) => void;
   // Buscar visualmente similares a una entrada (Fase 5)
   runSimilar: (entryId: number) => Promise<void>;
 
@@ -168,6 +173,13 @@ export const useCatalog = create<CatalogState>((set, get) => ({
 
   aiAvailable: false,
   setAiAvailable: (b) => set({ aiAvailable: b }),
+
+  nlClaude: getNlClaudeEnabled(),
+  setNlClaude: (b) => {
+    setNlClaudeEnabled(b);
+    set({ nlClaude: b });
+    void get().runSearch(get().searchQuery);
+  },
   runSimilar: async (entryId) => {
     const token = ++searchToken;
     set({
@@ -302,6 +314,54 @@ export const useCatalog = create<CatalogState>((set, get) => ({
   runSearch: async (query) => {
     set({ searchQuery: query });
 
+    // C3 — Lenguaje natural vía Claude (si el usuario lo activó y cargó su API key).
+    // Claude interpreta la frase → filtros (lugar/luz/fecha/tipo/tamaño) + concepto
+    // visual residual. Funciona aunque NO haya modelo CLIP: cae a búsqueda por
+    // atributos. Si la API falla, degrada al parser local.
+    const claudeKey = getClaudeKey();
+    if (get().nlClaude && claudeKey.trim()) {
+      if (!query.trim()) {
+        set({ mode: "browse", searchResult: null, searching: false, parsedFilters: null });
+        return;
+      }
+      const token = ++searchToken;
+      set({ mode: "search", searching: true, searchResult: null, selectedEntryId: null, selectedIds: [], parsedFilters: null });
+      try {
+        let nl: NLQuery;
+        try {
+          nl = await claudeNLToQuery(query, claudeKey);
+        } catch {
+          nl = parseNaturalQuery(query); // degradar al parser local si la API falla
+        }
+        if (token !== searchToken) return;
+        set({ parsedFilters: nl.filters });
+        const hasConcept = nl.concept.trim().length > 0;
+        let items: SearchResult["items"];
+        if (hasConcept && get().aiAvailable) {
+          const [sem, spoken] = await Promise.all([
+            api.aiSearch(nl.concept, get().semanticThreshold, 2000),
+            api.aiSearchTranscripts(nl.concept, 300).catch(() => []),
+          ]);
+          const visual = applyNLFilters(sem, nl.filters);
+          const spokenF = applyNLFilters(spoken, nl.filters);
+          const seen = new Set(visual.map((i) => i.id));
+          items = [...visual, ...spokenF.filter((i) => !seen.has(i.id))].slice(0, 300);
+        } else {
+          // Sin modelo visual: si quedó un concepto, lo usamos como texto (FTS por nombre).
+          const f: SearchFilters = { ...nl.filters };
+          if (hasConcept && !f.text) f.text = nl.concept;
+          const r = await api.searchAdvanced(f, 2000);
+          items = r.items;
+        }
+        if (token === searchToken) {
+          set({ searchResult: { total: items.length, items, truncated: false }, searching: false });
+        }
+      } catch (e) {
+        if (token === searchToken) set({ error: String(e), searching: false });
+      }
+      return;
+    }
+
     // Modo semántico (IA Fase 3): la query es lenguaje natural → se separa en
     // filtros estructurados (tipo/fecha/tamaño) + concepto visual. El concepto se
     // embebe y rankea por contenido; los filtros se aplican sobre el resultado.
@@ -317,9 +377,17 @@ export const useCatalog = create<CatalogState>((set, get) => ({
       try {
         let items: SearchResult["items"];
         if (hasConcept) {
-          // Pido un límite amplio para que el post-filtro no se quede corto.
-          const sem = await api.aiSearch(nl.concept, get().semanticThreshold, 2000);
-          items = applyNLFilters(sem, nl.filters).slice(0, 300);
+          // Busca por contenido VISUAL (embeddings) y por lo que se DICE
+          // (transcripciones, Fase 4) en paralelo, y fusiona. Pido límite amplio
+          // para que el post-filtro estructurado no se quede corto.
+          const [sem, spoken] = await Promise.all([
+            api.aiSearch(nl.concept, get().semanticThreshold, 2000),
+            api.aiSearchTranscripts(nl.concept, 300).catch(() => []),
+          ]);
+          const visual = applyNLFilters(sem, nl.filters);
+          const spokenF = applyNLFilters(spoken, nl.filters);
+          const seen = new Set(visual.map((i) => i.id));
+          items = [...visual, ...spokenF.filter((i) => !seen.has(i.id))].slice(0, 300);
         } else {
           // Solo filtros → búsqueda por atributos clásica (sin IA).
           const r = await api.searchAdvanced(nl.filters, 2000);

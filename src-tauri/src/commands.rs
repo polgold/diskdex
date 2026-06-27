@@ -1952,6 +1952,7 @@ fn rank_embeddings_to_items(
                 item,
                 score,
                 frame_ts,
+                snippet: None,
             }
         })
         .collect())
@@ -2169,6 +2170,128 @@ pub async fn ai_visual_duplicates(
     _min_size: Option<i64>,
     _limit: Option<i64>,
 ) -> Result<Vec<db::DupGroup>, String> {
+    Err("IA no compilada en este build (compilá con --features ai)".into())
+}
+
+/// Extensiones de audio (complemento de VIDEO_THUMB_EXTS para transcribir).
+#[cfg(feature = "ai")]
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "wav", "aiff", "aif", "flac", "aac", "m4a", "ogg", "oga", "wma", "caf", "opus", "m4b",
+];
+
+/// Audio + video: lo que tiene sentido transcribir.
+#[cfg(feature = "ai")]
+fn av_exts() -> Vec<&'static str> {
+    VIDEO_THUMB_EXTS.iter().chain(AUDIO_EXTS.iter()).copied().collect()
+}
+
+/// IA Fase 4 — transcribe el audio de los videos/audios de un disco MONTADO con
+/// Whisper y lo indexa para búsqueda full-text. Emite `ai://transcribe` `{done,total}`.
+#[cfg(feature = "ai")]
+#[tauri::command(async)]
+pub async fn ai_transcribe_disk(app: tauri::AppHandle, disk_id: i64) -> Result<i64, String> {
+    tauri::async_runtime::spawn_blocking(move || ai_transcribe_disk_blocking(app, disk_id))
+        .await
+        .map_err(|e| format!("error en la tarea de transcripción: {e}"))?
+}
+
+#[cfg(feature = "ai")]
+fn ai_transcribe_disk_blocking(app: tauri::AppHandle, disk_id: i64) -> Result<i64, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let path = {
+        let guard = state.catalog.lock().unwrap();
+        guard.as_ref().ok_or("no hay catálogo abierto")?.path.clone()
+    };
+    let model = std::env::var("DISKDEX_WHISPER_MODEL")
+        .unwrap_or_else(|_| crate::ai::WHISPER_REPO.to_string());
+
+    let _ = app.emit(
+        "ai://transcribe",
+        serde_json::json!({"done": 0, "total": -1, "phase": "loading"}),
+    );
+    let engine = crate::ai::whisper_engine().map_err(|e| format!("modelo Whisper: {e}"))?;
+
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let exts = av_exts();
+    let candidates =
+        db::transcript_candidates(&conn, disk_id, &exts).map_err(|e| e.to_string())?;
+    let total = candidates.len() as i64;
+    let _ = app.emit("ai://transcribe", serde_json::json!({"done": 0, "total": total}));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut done = 0i64;
+    for entry_id in candidates {
+        if let Ok(real) = resolve_real_path(&conn, entry_id) {
+            if let Ok(pcm) = video::extract_audio_pcm(&real) {
+                if !pcm.is_empty() {
+                    let res = {
+                        let mut e = engine.lock().unwrap();
+                        e.transcribe(&pcm)
+                    };
+                    if let Ok((lang, text)) = res {
+                        if !text.is_empty() {
+                            let lang_opt = if lang.is_empty() { None } else { Some(lang.as_str()) };
+                            db::store_transcript(&conn, entry_id, &model, lang_opt, &text, now)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
+        }
+        done += 1;
+        let _ = app.emit("ai://transcribe", serde_json::json!({"done": done, "total": total}));
+    }
+    Ok(done)
+}
+
+#[cfg(not(feature = "ai"))]
+#[tauri::command(async)]
+pub async fn ai_transcribe_disk(_app: tauri::AppHandle, _disk_id: i64) -> Result<i64, String> {
+    Err("IA no compilada en este build (compilá con --features ai)".into())
+}
+
+/// Busca en las transcripciones (lo que se DICE en los videos/audios). Devuelve
+/// `SemanticItem`s con `snippet` = fragmento donde matchea.
+#[cfg(feature = "ai")]
+#[tauri::command(async)]
+pub async fn ai_search_transcripts(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    let limit = limit.unwrap_or(200);
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    let hits = db::search_transcripts(&cat.conn, &query, limit).map_err(|e| e.to_string())?;
+    let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+    let snippets: std::collections::HashMap<i64, String> = hits.into_iter().collect();
+    let items = db::search_items_by_ids(&cat.conn, &ids).map_err(|e| e.to_string())?;
+    Ok(items
+        .into_iter()
+        .map(|item| {
+            let snippet = snippets.get(&item.id).cloned();
+            db::SemanticItem {
+                item,
+                score: 1.0,
+                frame_ts: None,
+                snippet,
+            }
+        })
+        .collect())
+}
+
+#[cfg(not(feature = "ai"))]
+#[tauri::command(async)]
+pub async fn ai_search_transcripts(
+    _state: tauri::State<'_, AppState>,
+    _query: String,
+    _limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
     Err("IA no compilada en este build (compilá con --features ai)".into())
 }
 

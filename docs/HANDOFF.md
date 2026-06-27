@@ -318,7 +318,33 @@ M9 (conector seguro — empezar por malla Tailscale + `GET /v1/file` read-only a
 - [ ] **F2. Cliente mobile** con chat: cliente read-only sobre el `.dccat` portátil
       (sync vía Dropbox). Se diseña cuando A–F1 estén encaminados.
 
-### Orden sugerido para empezar
-**A1 → A2 → B1** desbloquea lo más pedido (auditar backup) con el menor riesgo. B2 agrega el
-copiar. Recién después C (ubicación/NL) y D (gather), que se apoyan en la misma extracción.
-E (cloud) es independiente y se puede intercalar cuando quieras. F es lo más pesado, al final.
+### Estado al cierre de esta sesión (para retomar)
+
+**HECHO y COMMITEADO** (cadena de commits en `main`):
+`690730e` (sesiones previas) → `157b15e` (A1 migraciones + A2 hash + A2-preserve + A2-meta GPS/cámara
+video + B1 compare + C1 reverse-geocode + roadmap docs) → `4265c85` (C2 atardeceres/posición solar) →
+`26d06f0` (C3 NL→query vía Claude, frontend) → `907a3d5` (D gather multi-disco) → `91215ef` (D-folders).
+
+- **Bloque A** (fundaciones del escaneo enriquecido) — ✅ completo.
+- **Bloque B** (auditoría de backup: comparar + copiar verificado por hash) — ✅ completo.
+- **Bloque C** (ubicación + atardeceres + lenguaje natural) — ✅ completo.
+- **Bloque D** (reunir multi-disco, con expansión de carpetas) — ✅ completo.
+
+Estado: **71 cargo tests + tsc + vitest en verde.** Diseño detallado de todo en
+[`DISENO-cloud-y-backup.md`](./DISENO-cloud-y-backup.md).
+
+**PRÓXIMA SESIÓN — recomendado: Bloque E (Cloud Fase 1).** Arrancar por la parte limpia y testeable:
+`scan::detect_cloud_provider(path) -> Option<icloud|dropbox|gdrive>` (match de rutas conocidas:
+`com~apple~CloudDocs`, `~/Dropbox`, `~/Google Drive`/`CloudStorage/GoogleDrive-*`) + setear
+`disks.cloud_provider/cloud_root` (columnas ya existen). DESPUÉS: detección de placeholders
+(macOS `st_flags & SF_DATALESS`, 0x40000000) → `entries.cloud_state=1` (columna ya existe) — esto
+requiere hilar `cloud_state` por el walk→ingest (agregar campo a `DcmfEntry` o un Vec paralelo);
+saltear thumbnail si `cloud_state=1` (no forzar descarga); badges de nube en UI.
+
+**Otros pendientes menores:** A2-meta-fotos (exiftool sidecar para GPS de fotos/RAW; el video ya
+está vía ffprobe) · B1-folder (UI para comparar a nivel carpeta; el backend ya acepta `entry_id`) ·
+F1 CLIP (ya hay spike `ai.rs`) · F2 mobile.
+
+**⚠️ DISCO:** el `target/` de Rust crece a ~15G y el Mac queda con poco espacio (se llenó al 100%
+esta sesión). Antes de un build pesado, `cargo clean` o borrar `target/release` + `target/debug/incremental`.
+Esta sesión se hizo `cargo clean` (quedaron ~23G libres).

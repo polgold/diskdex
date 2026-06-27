@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { HardDrive, Database, Import, FolderOpen, Loader2, ScanLine, Usb, X, Share2 } from "lucide-react";
-import { api, onVolumeAdded, onVolumeRemoved, type VolumeInfo } from "./lib/ipc";
+import {
+  api,
+  onVolumeAdded,
+  onVolumeRemoved,
+  onScanProgress,
+  onIndexProgress,
+  type VolumeInfo,
+  type IndexProgress,
+} from "./lib/ipc";
 import { formatBytes, formatCount } from "./lib/format";
 import { useCatalog } from "./store/catalog";
 import { ScanDialog } from "./components/ScanDialog";
@@ -18,6 +26,11 @@ function App() {
   const { disks, error, loading, lastImport, catalogPath, setImportResult, setError, setLoading } =
     useCatalog();
   const [status, setStatus] = useState<string>("");
+  // Qué hacer DESPUÉS de escanear (cacheo pesado): el usuario decide. En discos
+  // grandes/lentos (exFAT, NAS) conviene desactivar lo que no necesita.
+  const [postScan, setPostScan] = useState({ thumbnails: true, videos: true, archives: true });
+  const [scanCount, setScanCount] = useState<number | null>(null);
+  const [indexProg, setIndexProg] = useState<IndexProgress | null>(null);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanningPath, setScanningPath] = useState<string | null>(null);
   const [detected, setDetected] = useState<VolumeInfo | null>(null);
@@ -33,6 +46,8 @@ function App() {
       onVolumeRemoved(() => {
         if (catalogPathRef.current) useCatalog.getState().refreshOnlineFromDisk();
       }),
+      onScanProgress((p) => setScanCount(p.count)),
+      onIndexProgress((p) => setIndexProg(p.done >= p.total ? null : p)),
     ];
     return () => unlisteners.forEach((p) => p.then((un) => un()));
   }, []);
@@ -114,9 +129,11 @@ function App() {
     setError(null);
     if (!(await ensureCatalog())) return;
     setScanningPath(mountPath);
+    setScanCount(0);
     setStatus(`Escaneando ${name}…`);
     try {
       const r = await api.scanDisk(mountPath, name);
+      setScanCount(null);
       await useCatalog.getState().refreshDisks();
       await useCatalog.getState().refreshOnlineFromDisk();
       setStatus(
@@ -129,25 +146,36 @@ function App() {
       // Post-escaneo en segundo plano (con el disco aún montado): miniaturas de
       // imágenes, metadata+frames de video y contenido de archivos comprimidos.
       // Todo queda cacheado en el .dccat y visible offline. No bloquea la UI.
-      void (async () => {
-        try {
-          const t = await api.cacheDiskThumbnails(r.disk_id);
-          if (t.generated > 0) setStatus(`${formatCount(t.generated)} miniaturas cacheadas en ${name}`);
-          const v = await api.indexDiskVideos(r.disk_id);
-          if (v.indexed > 0)
-            setStatus(`${formatCount(v.indexed)} videos analizados en ${name} (${formatCount(v.frames)} frames)`);
-          const a = await api.indexDiskArchives(r.disk_id);
-          if (a.indexed > 0)
-            setStatus(`${formatCount(a.indexed)} archivos comprimidos indexados en ${name}`);
-        } catch {
-          /* el indexado es best-effort; no interrumpe el flujo */
-        }
-      })();
+      if (postScan.thumbnails || postScan.videos || postScan.archives) {
+        void (async () => {
+          try {
+            if (postScan.thumbnails) {
+              const t = await api.cacheDiskThumbnails(r.disk_id);
+              if (t.generated > 0) setStatus(`${formatCount(t.generated)} miniaturas cacheadas en ${name}`);
+            }
+            if (postScan.videos) {
+              const v = await api.indexDiskVideos(r.disk_id);
+              if (v.indexed > 0)
+                setStatus(`${formatCount(v.indexed)} videos analizados en ${name} (${formatCount(v.frames)} frames)`);
+            }
+            if (postScan.archives) {
+              const a = await api.indexDiskArchives(r.disk_id);
+              if (a.indexed > 0)
+                setStatus(`${formatCount(a.indexed)} archivos comprimidos indexados en ${name}`);
+            }
+          } catch {
+            /* el indexado es best-effort; no interrumpe el flujo */
+          } finally {
+            setIndexProg(null);
+          }
+        })();
+      }
     } catch (e) {
       setError(String(e));
       setStatus("");
     } finally {
       setScanningPath(null);
+      setScanCount(null);
     }
   }
 
@@ -202,6 +230,19 @@ function App() {
         </div>
       )}
 
+      {(scanCount !== null || indexProg) && (
+        <div className="border-b border-border bg-neutral-900/40 px-4 py-1.5">
+          {indexProg ? (
+            <ProgressBar progress={indexProg} />
+          ) : (
+            <div className="flex items-center gap-2 text-[11px] text-neutral-400">
+              <Loader2 className="h-3 w-3 animate-spin text-primary" />
+              Escaneando… <span className="font-mono text-neutral-200">{formatCount(scanCount ?? 0)}</span> entradas
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Workspace de 3 paneles (M2/M3) o estado vacío */}
       {hasCatalog ? (
         <div className="grid flex-1 grid-cols-[260px_1fr_320px] overflow-hidden">
@@ -233,11 +274,46 @@ function App() {
       </footer>
 
       {scanOpen && (
-        <ScanDialog onClose={() => setScanOpen(false)} onScan={handleScan} scanningPath={scanningPath} />
+        <ScanDialog
+          onClose={() => setScanOpen(false)}
+          onScan={handleScan}
+          scanningPath={scanningPath}
+          options={postScan}
+          setOptions={setPostScan}
+        />
       )}
       {shareOpen && <ShareDialog onClose={() => setShareOpen(false)} />}
     </div>
     </TooltipProvider>
+  );
+}
+
+const PHASE_LABELS: Record<IndexProgress["phase"], string> = {
+  thumbnails: "Generando miniaturas",
+  videos: "Analizando videos",
+  archives: "Indexando archivos comprimidos",
+};
+
+function ProgressBar({ progress }: { progress: IndexProgress }) {
+  const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  return (
+    <div>
+      <div className="flex items-center justify-between text-[11px] text-neutral-400">
+        <span className="flex items-center gap-1.5">
+          <Loader2 className="h-3 w-3 animate-spin text-primary" />
+          {PHASE_LABELS[progress.phase]}…
+        </span>
+        <span className="font-mono text-neutral-300">
+          {formatCount(progress.done)} / {formatCount(progress.total)} ({pct}%)
+        </span>
+      </div>
+      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-neutral-800">
+        <div
+          className="h-full rounded-full bg-primary transition-[width] duration-200"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
   );
 }
 

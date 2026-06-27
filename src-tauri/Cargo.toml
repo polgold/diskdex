@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Disk catalog app (DiskCatalogMaker-compatible) with secure remote connector"
 authors = ["polgold"]
 edition = "2021"
+# Hay varios binarios auxiliares (agent_probe/scan_probe/validate_dcmf); este es
+# el que `cargo run` / `tauri dev` deben lanzar por defecto.
+default-run = "diskdex"
 
 [lib]
 # El sufijo `_lib` evita conflicto de nombre con el binario en Windows.

@@ -259,3 +259,17 @@ export const onVolumeAdded = (cb: (v: VolumeInfo) => void): Promise<UnlistenFn> 
   listen<VolumeInfo>("volume-added", (e) => cb(e.payload));
 export const onVolumeRemoved = (cb: (v: VolumeInfo) => void): Promise<UnlistenFn> =>
   listen<VolumeInfo>("volume-removed", (e) => cb(e.payload));
+
+// Progreso de escaneo / indexado (Fase B).
+export interface ScanProgress {
+  count: number;
+}
+export interface IndexProgress {
+  phase: "thumbnails" | "videos" | "archives";
+  done: number;
+  total: number;
+}
+export const onScanProgress = (cb: (p: ScanProgress) => void): Promise<UnlistenFn> =>
+  listen<ScanProgress>("scan-progress", (e) => cb(e.payload));
+export const onIndexProgress = (cb: (p: IndexProgress) => void): Promise<UnlistenFn> =>
+  listen<IndexProgress>("index-progress", (e) => cb(e.payload));

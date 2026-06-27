@@ -113,6 +113,17 @@ fn is_time_machine_artifact(name: &str) -> bool {
 /// Escanea un volumen/carpeta montado y devuelve su árbol como `DcmfDisk`.
 /// `volume_name` define el nombre del nodo raíz (label del volumen).
 pub fn scan_volume(root: &Path, volume_name: &str, opts: &ScanOptions) -> std::io::Result<DcmfDisk> {
+    scan_volume_cb(root, volume_name, opts, &mut |_| {})
+}
+
+/// Igual que `scan_volume` pero invoca `progress(entradas_acumuladas)` de forma
+/// periódica durante el recorrido (para reportar avance a la UI).
+pub fn scan_volume_cb(
+    root: &Path,
+    volume_name: &str,
+    opts: &ScanOptions,
+    progress: &mut dyn FnMut(u64),
+) -> std::io::Result<DcmfDisk> {
     let root_meta = fs::metadata(root)?;
     let mut entries: Vec<DcmfEntry> = Vec::new();
 
@@ -140,6 +151,11 @@ pub fn scan_volume(root: &Path, volume_name: &str, opts: &ScanOptions) -> std::i
             let name = entry.file_name().to_string_lossy().to_string();
 
             // Exclusiones.
+            // Basura de macOS: AppleDouble (`._*`) y `.DS_Store` nunca aportan al
+            // catálogo y duplican el conteo en discos externos/exFAT — se saltan siempre.
+            if name == ".DS_Store" || name.starts_with("._") {
+                continue;
+            }
             if opts.skip_hidden && name.starts_with('.') {
                 continue;
             }
@@ -177,12 +193,18 @@ pub fn scan_volume(root: &Path, volume_name: &str, opts: &ScanOptions) -> std::i
                 modified: st_to_unix(meta.modified()),
             });
 
+            // Reportar avance periódicamente (sin saturar el canal de eventos).
+            if entries.len() % 4096 == 0 {
+                progress(entries.len() as u64);
+            }
+
             if is_dir && (!is_symlink || opts.follow_symlinks) {
                 stack.push((path, idx));
             }
         }
     }
 
+    progress(entries.len() as u64);
     Ok(DcmfDisk {
         name: volume_name.to_string(),
         entries,

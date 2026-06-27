@@ -50,6 +50,35 @@ function BrowseTable() {
     overscan: 25,
   });
 
+  // Navegación con teclado: ↑/↓ mueven la selección (no la ventana) y Enter abre carpeta.
+  const selectedIndex = entries.findIndex((e) => e.id === selectedEntryId);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      if (entries.length === 0) return;
+      if (e.key === "Enter") {
+        const cur = entries[selectedIndex];
+        if (cur?.is_folder) {
+          e.preventDefault();
+          openFolder(cur);
+        }
+        return;
+      }
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      e.preventDefault();
+      const delta = e.key === "ArrowDown" ? 1 : -1;
+      const next = selectedIndex < 0 ? 0 : Math.min(entries.length - 1, Math.max(0, selectedIndex + delta));
+      const target = entries[next];
+      if (target) {
+        selectEntry(target.id);
+        rv.scrollToIndex(next, { align: "auto" });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [entries, selectedIndex, selectEntry, openFolder, rv]);
+
   if (selectedDiskId == null) {
     return (
       <Centered>
@@ -132,6 +161,26 @@ function SearchTable() {
     estimateSize: () => 38,
     overscan: 25,
   });
+
+  // Navegación con teclado por los resultados.
+  const selectedIndex = items.findIndex((it) => it.id === selectedEntryId);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      if (items.length === 0 || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
+      e.preventDefault();
+      const delta = e.key === "ArrowDown" ? 1 : -1;
+      const next = selectedIndex < 0 ? 0 : Math.min(items.length - 1, Math.max(0, selectedIndex + delta));
+      const target = items[next];
+      if (target) {
+        selectEntry(target.id);
+        rv.scrollToIndex(next, { align: "auto" });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [items, selectedIndex, selectEntry, rv]);
 
   return (
     <div className="flex h-full flex-col">

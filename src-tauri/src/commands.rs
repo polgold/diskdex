@@ -66,6 +66,25 @@ pub fn ping() -> String {
     "pong".into()
 }
 
+// ---------- Progreso (eventos a la UI) ----------
+
+#[derive(Clone, Serialize)]
+struct ScanProgress {
+    count: u64,
+}
+
+/// Avance de una fase de post-procesamiento (miniaturas/videos/archivos).
+#[derive(Clone, Serialize)]
+struct IndexProgress {
+    phase: &'static str,
+    done: i64,
+    total: i64,
+}
+
+fn emit_index(app: &tauri::AppHandle, phase: &'static str, done: i64, total: i64) {
+    let _ = app.emit("index-progress", IndexProgress { phase, done, total });
+}
+
 // ---------- M9: conector remoto seguro ----------
 
 #[derive(Serialize)]
@@ -184,7 +203,7 @@ pub fn agent_revoke(
 
 /// M1: importa un archivo `.dcmf` a un catálogo `.dccat` (lo crea/abre) y deja
 /// el catálogo abierto en el estado. Devuelve un resumen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_dcmf(
     state: tauri::State<'_, AppState>,
     dcmf_path: String,
@@ -388,7 +407,7 @@ fn render_thumbnail_png(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u3
 /// Thumbnail/preview de una imagen. Primero busca en el cache del catálogo (lo
 /// que permite verlo con el disco DESCONECTADO); si no está y el disco está
 /// montado, lo genera on-demand y lo cachea. Devuelve un data URL PNG.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_thumbnail(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -432,8 +451,9 @@ pub struct ThumbCacheSummary {
 /// Genera y cachea en el catálogo los thumbnails faltantes de un disco (Fase A).
 /// Pensado para correr justo después de un escaneo, mientras el disco sigue montado,
 /// así las miniaturas quedan disponibles aunque luego se desconecte.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cache_disk_thumbnails(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     disk_id: i64,
 ) -> Result<ThumbCacheSummary, String> {
@@ -455,6 +475,10 @@ pub fn cache_disk_thumbnails(
     let total = jobs.len() as i64;
     let mut generated = 0i64;
     let mut failed = 0i64;
+    let mut done = 0i64;
+    if total > 0 {
+        emit_index(&app, "thumbnails", 0, total);
+    }
     for (id, path) in jobs {
         match render_thumbnail_png(&path, THUMB_CACHE_MAX) {
             Ok((png, w, h)) => {
@@ -467,6 +491,10 @@ pub fn cache_disk_thumbnails(
                 }
             }
             Err(_) => failed += 1,
+        }
+        done += 1;
+        if done % 8 == 0 || done == total {
+            emit_index(&app, "thumbnails", done, total);
         }
     }
     Ok(ThumbCacheSummary { total, generated, failed })
@@ -508,8 +536,9 @@ pub struct VideoIndexSummary {
 /// Indexa metadata + tira de frames de los videos de un disco (post-escaneo,
 /// con el disco montado). Guarda también un frame póster como thumbnail, así los
 /// videos se previsualizan offline igual que las imágenes.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn index_disk_videos(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     disk_id: i64,
 ) -> Result<VideoIndexSummary, String> {
@@ -528,7 +557,13 @@ pub fn index_disk_videos(
 
     let total = jobs.len() as i64;
     let (mut indexed, mut failed, mut frames) = (0i64, 0i64, 0i64);
+    let mut done = 0i64;
+    if total > 0 {
+        emit_index(&app, "videos", 0, total);
+    }
     for (id, path) in jobs {
+        done += 1;
+        emit_index(&app, "videos", done, total);
         let meta = match video::probe_video(&path) {
             Ok(m) => m,
             Err(_) => {
@@ -597,7 +632,7 @@ pub fn get_video_frames(
 
 /// Detección de escenas on-demand de un video (requiere disco montado). Devuelve
 /// los segundos de los cortes detectados.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn detect_video_scenes(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -621,8 +656,9 @@ pub struct ArchiveIndexSummary {
 
 /// Indexa el contenido (nombres/tamaños/fechas) de los archivos comprimidos de un
 /// disco (post-escaneo, con el disco montado).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn index_disk_archives(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     disk_id: i64,
 ) -> Result<ArchiveIndexSummary, String> {
@@ -638,7 +674,13 @@ pub fn index_disk_archives(
 
     let total = jobs.len() as i64;
     let (mut indexed, mut failed, mut items) = (0i64, 0i64, 0i64);
+    let mut done = 0i64;
+    if total > 0 {
+        emit_index(&app, "archives", 0, total);
+    }
     for (id, path) in jobs {
+        done += 1;
+        emit_index(&app, "archives", done, total);
         match archive::list_archive(&path) {
             Ok(list) => {
                 items += list.len() as i64;
@@ -747,8 +789,9 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
 /// M5: escanea un volumen/carpeta montado y lo guarda como disco del catálogo.
 /// Re-escanea (reemplaza) si ya existe un disco con el mismo fingerprint.
 /// Requiere un catálogo abierto.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_disk(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     mount_path: String,
     name: Option<String>,
@@ -770,7 +813,15 @@ pub fn scan_disk(
     let fingerprint = scan::volume_fingerprint(&root);
     let (capacity, kind) = volume_caps(&mount_path);
 
-    let disk = scan::scan_volume(&root, &volume_name, &opts).map_err(|e| format!("error escaneando: {e}"))?;
+    let disk = {
+        let app = app.clone();
+        scan::scan_volume_cb(&root, &volume_name, &opts, &mut |count| {
+            let _ = app.emit("scan-progress", ScanProgress { count });
+        })
+        .map_err(|e| format!("error escaneando: {e}"))?
+    };
+    // Señal de fin de fase de escaneo (la UI esconde el contador).
+    let _ = app.emit("scan-progress", ScanProgress { count: disk.entries.len() as u64 });
 
     let mut guard = state.catalog.lock().unwrap();
     let cat = guard.as_mut().ok_or("no hay catálogo abierto: creá o abrí uno antes de escanear")?;

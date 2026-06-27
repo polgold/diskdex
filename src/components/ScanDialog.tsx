@@ -1,16 +1,24 @@
-import { useEffect, useState } from "react";
-import { HardDrive, Usb, Loader2, X, RefreshCw, FolderPlus, Network } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { HardDrive, Usb, Loader2, X, RefreshCw, FolderPlus, Network, Image as ImageIcon, Film, Package } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, type VolumeInfo } from "../lib/ipc";
 import { formatBytes } from "../lib/format";
+
+export interface PostScanOptions {
+  thumbnails: boolean;
+  videos: boolean;
+  archives: boolean;
+}
 
 interface Props {
   onClose: () => void;
   onScan: (mountPath: string, name: string) => void;
   scanningPath: string | null;
+  options: PostScanOptions;
+  setOptions: (o: PostScanOptions) => void;
 }
 
-export function ScanDialog({ onClose, onScan, scanningPath }: Props) {
+export function ScanDialog({ onClose, onScan, scanningPath, options, setOptions }: Props) {
   const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -117,11 +125,63 @@ export function ScanDialog({ onClose, onScan, scanningPath }: Props) {
             <Network className="h-3.5 w-3.5" /> incluye shares de NAS montados
           </span>
         </div>
-        <div className="border-t border-neutral-800 px-4 py-2 text-[11px] text-neutral-500">
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-3 py-2">
+          <span className="mr-1 text-[11px] text-neutral-500">Tras escanear:</span>
+          <OptToggle
+            icon={<ImageIcon className="h-3.5 w-3.5" />}
+            label="Miniaturas"
+            on={options.thumbnails}
+            onClick={() => setOptions({ ...options, thumbnails: !options.thumbnails })}
+          />
+          <OptToggle
+            icon={<Film className="h-3.5 w-3.5" />}
+            label="Analizar videos"
+            on={options.videos}
+            onClick={() => setOptions({ ...options, videos: !options.videos })}
+          />
+          <OptToggle
+            icon={<Package className="h-3.5 w-3.5" />}
+            label="Contenido de archivos"
+            on={options.archives}
+            onClick={() => setOptions({ ...options, archives: !options.archives })}
+          />
+        </div>
+
+        <div className="border-t border-border px-4 py-2 text-[11px] text-neutral-500">
           Se guarda el árbol completo (tamaños lógico/físico, fechas) y un fingerprint del volumen
-          para reconocerlo al reconectarlo. Re-escanear reemplaza el disco anterior.
+          para reconocerlo al reconectarlo. Re-escanear reemplaza el disco anterior. El análisis de
+          miniaturas/videos corre en segundo plano y puede tardar en discos lentos.
         </div>
       </div>
     </div>
+  );
+}
+
+/** Chip-toggle para una opción de post-escaneo. */
+function OptToggle({
+  icon,
+  label,
+  on,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  on: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      role="switch"
+      aria-checked={on}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors duration-150 ${
+        on
+          ? "border-primary/40 bg-primary/15 text-primary"
+          : "border-border bg-transparent text-neutral-500 hover:bg-accent/60"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }

@@ -129,6 +129,86 @@ export function ContentTable() {
   return mode === "search" ? <SearchTable /> : <BrowseTable />;
 }
 
+interface ColDef {
+  key: string;
+  label: string;
+  align?: "right";
+  flex?: boolean;
+}
+
+/** Anchos de columna persistidos + arrastre para redimensionar. */
+function useColWidths(storageKey: string, defaults: Record<string, number>) {
+  const [widths, setWidths] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) return { ...defaults, ...JSON.parse(saved) };
+    } catch {
+      /* ignore */
+    }
+    return defaults;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(storageKey, JSON.stringify(widths));
+  }, [storageKey, widths]);
+
+  const startResize = (key: string) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = widths[key];
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(48, Math.min(900, startW + (ev.clientX - startX)));
+      setWidths((prev) => ({ ...prev, [key]: w }));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  return { widths, startResize };
+}
+
+function ResizableHeaderRow({
+  cols,
+  widths,
+  startResize,
+}: {
+  cols: ColDef[];
+  widths: Record<string, number>;
+  startResize: (key: string) => (e: React.MouseEvent) => void;
+}) {
+  return (
+    <div className="flex items-center border-b border-neutral-800 bg-neutral-900/40 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-neutral-500">
+      {cols.map((c) => (
+        <div
+          key={c.key}
+          className={`relative flex items-center ${c.flex ? "min-w-0 flex-1" : ""} ${
+            c.align === "right" ? "justify-end" : ""
+          }`}
+          style={c.flex ? undefined : { width: widths[c.key] }}
+        >
+          <span className="truncate">{c.label}</span>
+          {!c.flex && (
+            <span
+              onMouseDown={startResize(c.key)}
+              className="group absolute -right-1.5 top-1/2 z-10 h-5 w-3 -translate-y-1/2 cursor-col-resize"
+              title="Arrastrá para redimensionar"
+            >
+              <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-neutral-700 group-hover:bg-primary" />
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Breadcrumb() {
   const breadcrumb = useCatalog((s) => s.breadcrumb);
   const navigateToCrumb = useCatalog((s) => s.navigateToCrumb);
@@ -163,6 +243,11 @@ function BrowseTable() {
   const setError = useCatalog((s) => s.setError);
   const parentRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const { widths, startResize } = useColWidths("diskdex:cols:browse", {
+    size: 112,
+    modified: 176,
+    type: 80,
+  });
 
   const rv = useVirtualizer({
     count: entries.length,
@@ -214,13 +299,15 @@ function BrowseTable() {
       {menu && <RowContextMenu menu={menu} onClose={() => setMenu(null)} />}
       <Breadcrumb />
       {breadcrumb.length === 1 && selectedDiskId != null && <DiskMetaBar diskId={selectedDiskId} />}
-      <HeaderRow
+      <ResizableHeaderRow
         cols={[
-          ["Nombre", "flex-1"],
-          ["Tamaño", "w-28 text-right"],
-          ["Modificado", "w-44"],
-          ["Tipo", "w-20"],
+          { key: "name", label: "Nombre", flex: true },
+          { key: "size", label: "Tamaño", align: "right" },
+          { key: "modified", label: "Modificado" },
+          { key: "type", label: "Tipo" },
         ]}
+        widths={widths}
+        startResize={startResize}
       />
       <div ref={parentRef} className="relative flex-1 overflow-auto">
         {loading && <RowOverlay text="cargando…" />}
@@ -261,11 +348,22 @@ function BrowseTable() {
                     <span className="text-[11px] text-neutral-600">{formatCount(e.child_count)}</span>
                   )}
                 </span>
-                <span className="w-28 text-right font-mono text-xs text-neutral-400">
+                <span
+                  className="shrink-0 text-right font-mono text-xs text-neutral-400"
+                  style={{ width: widths.size }}
+                >
                   {e.is_folder && e.size_logical === 0 ? "—" : formatBytes(e.size_logical)}
                 </span>
-                <span className="w-44 font-mono text-xs text-neutral-500">{formatDate(e.modified_at)}</span>
-                <span className="w-20 truncate text-xs text-neutral-500">
+                <span
+                  className="shrink-0 font-mono text-xs text-neutral-500"
+                  style={{ width: widths.modified }}
+                >
+                  {formatDate(e.modified_at)}
+                </span>
+                <span
+                  className="shrink-0 truncate text-xs text-neutral-500"
+                  style={{ width: widths.type }}
+                >
                   {e.is_folder ? "carpeta" : e.ext ?? "—"}
                 </span>
               </div>
@@ -286,6 +384,11 @@ function SearchTable() {
   const parentRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const items: SearchItem[] = result?.items ?? [];
+  const { widths, startResize } = useColWidths("diskdex:cols:search", {
+    disk: 128,
+    size: 96,
+    path: 360,
+  });
 
   const rv = useVirtualizer({
     count: items.length,
@@ -333,13 +436,15 @@ function SearchTable() {
         ) : null}
         <FilterChips />
       </div>
-      <HeaderRow
+      <ResizableHeaderRow
         cols={[
-          ["Nombre", "flex-1"],
-          ["Disco", "w-32"],
-          ["Tamaño", "w-24 text-right"],
-          ["Ruta", "w-[40%]"],
+          { key: "name", label: "Nombre", flex: true },
+          { key: "disk", label: "Disco" },
+          { key: "size", label: "Tamaño", align: "right" },
+          { key: "path", label: "Ruta" },
         ]}
+        widths={widths}
+        startResize={startResize}
       />
       <div ref={parentRef} className="relative flex-1 overflow-auto">
         {!searching && result && items.length === 0 && <RowOverlay text="sin resultados" />}
@@ -376,11 +481,23 @@ function SearchTable() {
                     {it.name}
                   </span>
                 </span>
-                <span className="w-32 truncate text-xs text-neutral-400">{it.disk_name}</span>
-                <span className="w-24 text-right font-mono text-xs text-neutral-400">
+                <span
+                  className="shrink-0 truncate text-xs text-neutral-400"
+                  style={{ width: widths.disk }}
+                >
+                  {it.disk_name}
+                </span>
+                <span
+                  className="shrink-0 text-right font-mono text-xs text-neutral-400"
+                  style={{ width: widths.size }}
+                >
                   {it.is_folder ? "—" : formatBytes(it.size_logical)}
                 </span>
-                <span className="w-[40%] truncate font-mono text-[11px] text-neutral-500" title={it.path}>
+                <span
+                  className="shrink-0 truncate font-mono text-[11px] text-neutral-500"
+                  style={{ width: widths.path }}
+                  title={it.path}
+                >
                   {it.path}
                 </span>
               </div>
@@ -453,18 +570,6 @@ function FilterChips() {
         </span>
       ))}
     </span>
-  );
-}
-
-function HeaderRow({ cols }: { cols: [string, string][] }) {
-  return (
-    <div className="flex items-center border-b border-neutral-800 bg-neutral-900/40 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-neutral-500">
-      {cols.map(([label, cls]) => (
-        <span key={label} className={cls}>
-          {label}
-        </span>
-      ))}
-    </div>
   );
 }
 

@@ -299,7 +299,7 @@ export const api = {
     invoke<ImportSummary>("import_dcmf", { dcmfPath, catalogPath }),
   dcmfDiskNames: (dcmfPath: string) => invoke<string[]>("dcmf_disk_names", { dcmfPath }),
   importDcmfMerge: (dcmfPath: string, replace: boolean) =>
-    invoke<ImportSummary>("import_dcmf_merge", { args: { dcmfPath, replace } }),
+    invoke<ImportSummary>("import_dcmf_merge", { dcmfPath, replace }),
 
   openCatalog: (catalogPath: string) => invoke<void>("open_catalog", { catalogPath }),
 

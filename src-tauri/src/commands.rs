@@ -351,24 +351,17 @@ pub fn dcmf_disk_names(dcmf_path: String) -> Result<Vec<String>, String> {
     Ok(dcmf::import_dcmf(&bytes).into_iter().map(|d| d.name).collect())
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportMergeArgs {
-    pub dcmf_path: String,
-    pub replace: bool,
-}
-
 /// Importa los discos de un `.dcmf` DENTRO del catálogo ABIERTO (no crea uno
 /// nuevo). Si un disco ya existe (por nombre): `replace=true` lo reemplaza,
 /// `replace=false` lo saltea (mantiene el actual). Devuelve cuántos importó.
-/// (Args en un struct único para evitar el borde de Tauri con varios args +
-/// State en comandos async.)
+/// Args planos (State + 2 args), igual que `import_dcmf` — el wrapper `{args:{…}}`
+/// rompía con "invalid type: map, expected a boolean".
 #[tauri::command(async)]
 pub fn import_dcmf_merge(
     state: tauri::State<'_, AppState>,
-    args: ImportMergeArgs,
+    dcmf_path: String,
+    replace: bool,
 ) -> Result<ImportSummary, String> {
-    let ImportMergeArgs { dcmf_path, replace } = args;
     let t0 = now_ms();
     let bytes = read_dcmf_bytes(&dcmf_path)?;
     let disks = dcmf::import_dcmf(&bytes);

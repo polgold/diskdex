@@ -9,12 +9,17 @@ import {
   Music,
   FileText,
   Package,
+  Trash2,
+  List,
+  LayoutGrid,
 } from "lucide-react";
 import { useCatalog } from "../store/catalog";
+import { useT } from "../lib/i18n";
 import { exportRows, type ExportRow, type ExportFormat } from "../lib/export";
 import { FILE_CATEGORIES } from "../lib/query-parser";
 import { StatsDialog } from "./StatsDialog";
 import { DuplicatesDialog } from "./DuplicatesDialog";
+import { trashIds } from "./ContentTable";
 
 const CATEGORY_ICONS: Record<string, React.ReactNode> = {
   imagen: <ImageIcon className="h-3.5 w-3.5" />,
@@ -26,12 +31,13 @@ const CATEGORY_ICONS: Record<string, React.ReactNode> = {
 
 /** Chips de filtro por tipo de archivo (estilo Dropbox). */
 function CategoryChips() {
+  const t = useT();
   const runSearch = useCatalog((s) => s.runSearch);
   const clearSearch = useCatalog((s) => s.clearSearch);
   const searchQuery = useCatalog((s) => s.searchQuery);
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {Object.entries(FILE_CATEGORIES).map(([key, c]) => {
+      {Object.entries(FILE_CATEGORIES).map(([key]) => {
         const active = searchQuery.trim() === `cat:${key}`;
         return (
           <button
@@ -44,7 +50,7 @@ function CategoryChips() {
             }`}
           >
             {CATEGORY_ICONS[key]}
-            {c.label}
+            {t(`toolbar.category_${key}`)}
           </button>
         );
       })}
@@ -59,17 +65,22 @@ const FORMATS: { f: ExportFormat; label: string }[] = [
   { f: "html", label: "HTML / PDF" },
 ];
 
-function extOf(name: string): string {
+function extOf(name: string, fallback: string): string {
   const i = name.lastIndexOf(".");
-  return i > 0 ? name.slice(i + 1).toLowerCase() : "archivo";
+  return i > 0 ? name.slice(i + 1).toLowerCase() : fallback;
 }
 
 export function ContentToolbar() {
+  const t = useT();
   const mode = useCatalog((s) => s.mode);
   const contentEntries = useCatalog((s) => s.contentEntries);
   const breadcrumb = useCatalog((s) => s.breadcrumb);
   const searchResult = useCatalog((s) => s.searchResult);
   const setError = useCatalog((s) => s.setError);
+  const selectedIds = useCatalog((s) => s.selectedIds);
+  const reloadCurrent = useCatalog((s) => s.reloadCurrent);
+  const viewMode = useCatalog((s) => s.viewMode);
+  const setViewMode = useCatalog((s) => s.setViewMode);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [stats, setStats] = useState(false);
@@ -81,18 +92,18 @@ export function ContentToolbar() {
         disk: it.disk_name,
         path: it.path,
         name: it.name,
-        type: it.is_folder ? "carpeta" : extOf(it.name),
+        type: it.is_folder ? t("toolbar.typeFolder") : extOf(it.name, t("toolbar.typeFile")),
         size: it.size_logical,
         modified: it.modified_at,
       }));
-      return { rows, name: "busqueda" };
+      return { rows, name: t("toolbar.exportNameSearch") };
     }
     const base = breadcrumb.map((c) => c.name).join("/");
     const rows = contentEntries.map<ExportRow>((e) => ({
       disk: breadcrumb[0]?.name ?? "",
       path: `/${base}/${e.name}`,
       name: e.name,
-      type: e.is_folder ? "carpeta" : e.ext ?? "archivo",
+      type: e.is_folder ? t("toolbar.typeFolder") : e.ext ?? t("toolbar.typeFile"),
       size: e.size_logical,
       modified: e.modified_at,
     }));
@@ -103,7 +114,7 @@ export function ContentToolbar() {
     setMenuOpen(false);
     const { rows, name } = buildRows();
     if (rows.length === 0) {
-      setError("No hay filas para exportar en la vista actual.");
+      setError(t("toolbar.exportEmpty"));
       return;
     }
     try {
@@ -123,9 +134,9 @@ export function ContentToolbar() {
           onBlur={() => setTimeout(() => setMenuOpen(false), 150)}
           disabled={count === 0}
           className="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800 disabled:opacity-40"
-          title="Exportar la vista actual"
+          title={t("toolbar.exportTitle")}
         >
-          <Download className="h-3.5 w-3.5" /> Exportar <ChevronDown className="h-3 w-3" />
+          <Download className="h-3.5 w-3.5" /> {t("toolbar.export")} <ChevronDown className="h-3 w-3" />
         </button>
         {menuOpen && (
           <div className="absolute left-0 top-full z-20 mt-1 w-32 overflow-hidden rounded-md border border-neutral-700 bg-neutral-900 shadow-xl">
@@ -146,21 +157,55 @@ export function ContentToolbar() {
         onClick={() => setStats(true)}
         className="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
       >
-        <BarChart3 className="h-3.5 w-3.5" /> Estadísticas
+        <BarChart3 className="h-3.5 w-3.5" /> {t("toolbar.stats")}
       </button>
       <button
         onClick={() => setDups(true)}
         className="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
       >
-        <Copy className="h-3.5 w-3.5" /> Duplicados
+        <Copy className="h-3.5 w-3.5" /> {t("toolbar.duplicates")}
       </button>
+
+      {selectedIds.length > 0 && (
+        <button
+          onClick={() => trashIds(selectedIds, reloadCurrent, setError, t)}
+          className="inline-flex items-center gap-1 rounded border border-red-900/60 px-2 py-1 text-xs text-red-300 hover:bg-red-950/50"
+          title={t("toolbar.trashTitle")}
+        >
+          <Trash2 className="h-3.5 w-3.5" /> {t("toolbar.trash", { count: selectedIds.length })}
+        </button>
+      )}
 
       <div className="mx-1 h-4 w-px bg-neutral-800" />
       <CategoryChips />
 
-      <span className="ml-auto text-[11px] text-neutral-600">
-        {count > 0 && `${count.toLocaleString()} filas en la vista`}
-      </span>
+      <div className="ml-auto flex items-center gap-2">
+        {/* Toggle de vista: tabla / galería */}
+        <div className="flex items-center rounded-md border border-neutral-700 p-0.5">
+          <button
+            onClick={() => setViewMode("table")}
+            title={t("toolbar.viewTable")}
+            className={`rounded p-1 ${viewMode === "table" ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
+          >
+            <List className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => setViewMode("grid")}
+            title={t("toolbar.viewGrid")}
+            className={`rounded p-1 ${viewMode === "grid" ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <span className="text-[11px] text-neutral-600">
+          {selectedIds.length > 0
+            ? t("toolbar.countSelected", {
+                selected: selectedIds.length.toLocaleString(),
+                count: count.toLocaleString(),
+              })
+            : count > 0 && t("toolbar.countRows", { count: count.toLocaleString() })}
+        </span>
+      </div>
 
       {stats && <StatsDialog onClose={() => setStats(false)} />}
       {dups && <DuplicatesDialog onClose={() => setDups(false)} />}

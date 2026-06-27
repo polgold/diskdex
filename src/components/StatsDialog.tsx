@@ -3,8 +3,10 @@ import { X, BarChart3, Loader2 } from "lucide-react";
 import { api, type Stats } from "../lib/ipc";
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatCount } from "../lib/format";
+import { useT } from "../lib/i18n";
 
 export function StatsDialog({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const selectedDiskId = useCatalog((s) => s.selectedDiskId);
   const disks = useCatalog((s) => s.disks);
   const [scope, setScope] = useState<"all" | "disk">("all");
@@ -24,39 +26,39 @@ export function StatsDialog({ onClose }: { onClose: () => void }) {
   const maxExt = stats?.by_ext[0]?.total_size ?? 1;
 
   return (
-    <Modal onClose={onClose} title="Estadísticas" icon={<BarChart3 className="h-4 w-4 text-emerald-400" />}>
+    <Modal onClose={onClose} title={t("stats.title")} icon={<BarChart3 className="h-4 w-4 text-emerald-400" />}>
       <div className="mb-3 flex items-center gap-2 text-xs">
         <button
           onClick={() => setScope("all")}
           className={`rounded px-2 py-1 ${scope === "all" ? "bg-neutral-700 text-white" : "text-neutral-400 hover:bg-neutral-800"}`}
         >
-          Todo el catálogo
+          {t("stats.scopeAll")}
         </button>
         {selectedDiskId != null && (
           <button
             onClick={() => setScope("disk")}
             className={`rounded px-2 py-1 ${scope === "disk" ? "bg-neutral-700 text-white" : "text-neutral-400 hover:bg-neutral-800"}`}
           >
-            Disco: {diskName}
+            {t("stats.scopeDisk", { name: diskName ?? "" })}
           </button>
         )}
       </div>
 
       {loading || !stats ? (
         <div className="flex items-center gap-2 py-10 text-sm text-neutral-500">
-          <Loader2 className="h-4 w-4 animate-spin" /> calculando…
+          <Loader2 className="h-4 w-4 animate-spin" /> {t("stats.calculating")}
         </div>
       ) : (
         <div className="space-y-5">
           <div className="flex gap-6">
-            <Stat n={formatCount(stats.file_count)} l="archivos" />
-            <Stat n={formatCount(stats.folder_count)} l="carpetas" />
-            <Stat n={formatBytes(stats.total_size)} l="tamaño total" />
+            <Stat n={formatCount(stats.file_count)} l={t("stats.files")} />
+            <Stat n={formatCount(stats.folder_count)} l={t("stats.folders")} />
+            <Stat n={formatBytes(stats.total_size)} l={t("stats.totalSize")} />
           </div>
 
           <div>
             <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
-              Por extensión (top 25 por tamaño)
+              {t("stats.byExtension")}
             </h3>
             <div className="space-y-1">
               {stats.by_ext.map((e) => (
@@ -74,7 +76,7 @@ export function StatsDialog({ onClose }: { onClose: () => void }) {
 
           <div>
             <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
-              Archivos más grandes
+              {t("stats.biggestFiles")}
             </h3>
             <div className="space-y-0.5">
               {stats.biggest.map((b) => (

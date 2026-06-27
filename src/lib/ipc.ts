@@ -23,6 +23,31 @@ export interface DiskRow {
   comment: string | null;
 }
 
+export interface TrashFailure {
+  id: number;
+  name: string;
+  error: string;
+}
+
+export interface TrashSummary {
+  moved: number;
+  failed: TrashFailure[];
+}
+
+export interface DiskDetail {
+  id: number;
+  name: string;
+  total_size: number;
+  file_count: number;
+  folder_count: number;
+  is_online: boolean;
+  kind: string | null;
+  capacity: number | null;
+  scanned_at: number | null;
+  live_total: number | null;
+  live_free: number | null;
+}
+
 export interface EntryRow {
   id: number;
   disk_id: number;
@@ -144,6 +169,10 @@ export interface ScanOptions {
   skip_hidden?: boolean;
   skip_time_machine?: boolean;
   exclude_names?: string[];
+  /** Fuerza escaneo completo (desactiva el re-escaneo incremental por mtime). */
+  force_full?: boolean;
+  /** Excluir basura (node_modules, caches, papeleras…). Opt-in. */
+  exclude_junk?: boolean;
 }
 
 export interface ScanSummary {
@@ -155,6 +184,8 @@ export interface ScanSummary {
   replaced: boolean;
   volume_uuid: string | null;
   elapsed_ms: number;
+  /** Carpetas reutilizadas sin descender el FS (re-escaneo incremental). */
+  reused_dirs: number;
 }
 
 export const api = {
@@ -162,10 +193,14 @@ export const api = {
 
   importDcmf: (dcmfPath: string, catalogPath: string) =>
     invoke<ImportSummary>("import_dcmf", { dcmfPath, catalogPath }),
+  dcmfDiskNames: (dcmfPath: string) => invoke<string[]>("dcmf_disk_names", { dcmfPath }),
+  importDcmfMerge: (dcmfPath: string, replace: boolean) =>
+    invoke<ImportSummary>("import_dcmf_merge", { args: { dcmfPath, replace } }),
 
   openCatalog: (catalogPath: string) => invoke<void>("open_catalog", { catalogPath }),
 
   listDisks: () => invoke<DiskRow[]>("list_disks"),
+  diskDetail: (diskId: number) => invoke<DiskDetail>("disk_detail", { diskId }),
 
   // M2 — navegación
   listChildren: (diskId: number, parentId: number | null) =>
@@ -185,6 +220,8 @@ export const api = {
   resolveFsPath: (entryId: number) => invoke<string>("resolve_fs_path", { entryId }),
   // Limpieza — mover el original a la papelera y sacarlo del catálogo
   moveToTrash: (entryId: number) => invoke<string>("move_to_trash", { entryId }),
+  moveEntriesToTrash: (entryIds: number[]) =>
+    invoke<TrashSummary>("move_entries_to_trash", { entryIds }),
 
   // Thumbnails — preview cacheado (offline) o generado on-demand (data URL PNG)
   getThumbnail: (entryId: number, max?: number) =>
@@ -218,8 +255,13 @@ export const api = {
     invoke<void>("set_entry_comment", { entryId, comment }),
   setDiskMeta: (diskId: number, location: string | null, category: string | null, comment: string | null) =>
     invoke<void>("set_disk_meta", { diskId, location, category, comment }),
+  deleteDisk: (diskId: number) => invoke<void>("delete_disk", { diskId }),
   writeTextFile: (path: string, contents: string) =>
     invoke<void>("write_text_file", { path, contents }),
+
+  // Sesión persistente (último catálogo) — durable en disco vía backend.
+  saveSession: (contents: string) => invoke<void>("save_session", { contents }),
+  loadSession: () => invoke<string | null>("load_session"),
 
   // M8 — estadísticas y duplicados
   catalogStats: (diskId?: number) => invoke<Stats>("catalog_stats", { diskId }),
@@ -230,6 +272,7 @@ export const api = {
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),
   scanDisk: (mountPath: string, name?: string, options?: ScanOptions) =>
     invoke<ScanSummary>("scan_disk", { mountPath, name, options }),
+  cancelScan: (mountPath: string) => invoke<void>("cancel_scan", { mountPath }),
   startVolumeWatch: () => invoke<void>("start_volume_watch"),
   refreshOnlineStatus: () => invoke<DiskRow[]>("refresh_online_status"),
 

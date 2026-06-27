@@ -36,3 +36,6 @@ dist-ssr
 # Secrets
 .env
 .env.*
+
+# ffmpeg/ffprobe sidecars (estáticos, pesados — se bajan con scripts/fetch-ffmpeg.sh)
+/src-tauri/binaries/

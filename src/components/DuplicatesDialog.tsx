@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Copy, Loader2, ChevronRight } from "lucide-react";
 import { api, type DupGroup } from "../lib/ipc";
 import { formatBytes, formatCount } from "../lib/format";
+import { useT } from "../lib/i18n";
 import { Modal } from "./StatsDialog";
 
 const MIN_SIZE_OPTIONS = [
@@ -12,6 +13,7 @@ const MIN_SIZE_OPTIONS = [
 ];
 
 export function DuplicatesDialog({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const [minSize, setMinSize] = useState(MIN_SIZE_OPTIONS[1].value);
   const [groups, setGroups] = useState<DupGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -28,9 +30,9 @@ export function DuplicatesDialog({ onClose }: { onClose: () => void }) {
   const totalWasted = groups.reduce((a, g) => a + g.wasted, 0);
 
   return (
-    <Modal onClose={onClose} title="Duplicados" icon={<Copy className="h-4 w-4 text-amber-400" />}>
+    <Modal onClose={onClose} title={t("dups.title")} icon={<Copy className="h-4 w-4 text-amber-400" />}>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
-        <span className="text-neutral-500">Tamaño mínimo:</span>
+        <span className="text-neutral-500">{t("dups.minSize")}</span>
         {MIN_SIZE_OPTIONS.map((o) => (
           <button
             key={o.value}
@@ -42,17 +44,17 @@ export function DuplicatesDialog({ onClose }: { onClose: () => void }) {
         ))}
         {!loading && (
           <span className="ml-auto text-neutral-400">
-            {formatCount(groups.length)} grupos · <span className="text-amber-300">{formatBytes(totalWasted)}</span> recuperables
+            {t("dups.groupsCount", { count: formatCount(groups.length) })} · <span className="text-amber-300">{formatBytes(totalWasted)}</span> {t("dups.recoverable")}
           </span>
         )}
       </div>
 
       {loading ? (
         <div className="flex items-center gap-2 py-10 text-sm text-neutral-500">
-          <Loader2 className="h-4 w-4 animate-spin" /> buscando duplicados…
+          <Loader2 className="h-4 w-4 animate-spin" /> {t("dups.searching")}
         </div>
       ) : groups.length === 0 ? (
-        <p className="py-8 text-center text-sm text-neutral-500">Sin duplicados con ese tamaño mínimo.</p>
+        <p className="py-8 text-center text-sm text-neutral-500">{t("dups.empty")}</p>
       ) : (
         <div className="space-y-1">
           {groups.map((g) => {

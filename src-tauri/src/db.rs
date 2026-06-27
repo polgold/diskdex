@@ -5,7 +5,7 @@
 //! statement preparado, y reconstrucción del índice FTS al final (mucho más
 //! rápido que mantenerlo por triggers durante una carga de millones de filas).
 
-use crate::dcmf::DcmfDisk;
+use crate::dcmf::{DcmfDisk, DcmfEntry};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -55,6 +55,10 @@ pub struct SearchResult {
 pub const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+-- Esperar (en vez de fallar con "database is locked") si otra conexión está
+-- escribiendo: permite ingestas de escaneo en su propia conexión + lecturas de
+-- la UI en paralelo, y dos escaneos concurrentes que serializan su commit.
+PRAGMA busy_timeout = 60000;
 
 CREATE TABLE IF NOT EXISTS disks (
   id            INTEGER PRIMARY KEY,
@@ -290,6 +294,79 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Carga el árbol catalogado de un disco como `DcmfDisk`, para reutilizar
+/// subárboles sin cambios en un re-escaneo incremental. Identifica el disco por
+/// `fingerprint` (Volume UUID) si está, o por `name` entre los discos sin
+/// fingerprint (exFAT/NTFS de Windows) — la MISMA identidad que usa el dedupe de
+/// `ingest_scanned`. Devuelve None si no hay match. Las entradas salen en orden
+/// de id (padres antes que hijos), con `parent` reapuntado a índices locales.
+pub fn load_disk_tree(
+    conn: &Connection,
+    fingerprint: Option<&str>,
+    name: &str,
+) -> DbResult<Option<DcmfDisk>> {
+    let found: Option<(i64, String)> = match fingerprint {
+        Some(fp) => conn
+            .query_row(
+                "SELECT id, name FROM disks WHERE volume_uuid = ?1 ORDER BY id DESC LIMIT 1",
+                params![fp],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
+        None => conn
+            .query_row(
+                "SELECT id, name FROM disks WHERE volume_uuid IS NULL AND name = ?1 \
+                 ORDER BY id DESC LIMIT 1",
+                params![name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
+    };
+    let (disk_id, name) = match found {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT id, parent_id, name, is_folder, size_logical, size_physical, created_at, modified_at \
+         FROM entries WHERE disk_id = ?1 ORDER BY id",
+    )?;
+    type Raw = (i64, Option<i64>, String, bool, i64, i64, Option<i64>, Option<i64>);
+    let raw: Vec<Raw> = stmt
+        .query_map(params![disk_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)? != 0,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    let mut idx = std::collections::HashMap::with_capacity(raw.len());
+    for (i, row) in raw.iter().enumerate() {
+        idx.insert(row.0, i as i32);
+    }
+    let entries = raw
+        .iter()
+        .map(|(_id, parent_id, name, is_folder, sl, sp, c, m)| DcmfEntry {
+            name: name.clone(),
+            parent: parent_id.and_then(|p| idx.get(&p).copied()).unwrap_or(-1),
+            is_folder: *is_folder,
+            is_volume: parent_id.is_none(),
+            size_logical: *sl as u64,
+            size_physical: *sp as u64,
+            created: c.unwrap_or(0),
+            modified: m.unwrap_or(0),
+        })
+        .collect();
+    Ok(Some(DcmfDisk { name, entries }))
+}
+
 /// Ingesta un disco escaneado (sección 7). Si ya existe un disco con el mismo
 /// `volume_uuid`, lo reemplaza (re-escaneo). Mantiene el FTS de forma incremental
 /// (sin reconstruir todo el índice) para no penalizar catálogos grandes.
@@ -309,35 +386,44 @@ pub fn ingest_scanned(
     let tx = conn.transaction()?;
     let mut replaced = false;
 
-    // Re-escaneo: eliminar el disco previo con el mismo fingerprint (y su FTS).
-    if let Some(uuid) = volume_uuid {
-        let old_ids: Vec<i64> = {
-            let mut stmt = tx.prepare("SELECT id FROM disks WHERE volume_uuid = ?1")?;
-            let ids = stmt.query_map(params![uuid], |r| r.get::<_, i64>(0))?;
-            ids.collect::<Result<_, _>>()?
+    // Re-escaneo: eliminar el/los disco(s) previo(s) que representen el MISMO
+    // disco físico (y su FTS). Con fingerprint (Volume UUID) matcheamos por él.
+    // Sin fingerprint —típico en exFAT/NTFS de Windows, que no exponen un UUID
+    // vía `diskutil`— caemos al nombre del volumen entre los discos también sin
+    // fingerprint, para no acumular un duplicado en cada re-escaneo.
+    let old_ids: Vec<i64> = {
+        let (sql, key): (&str, &str) = match volume_uuid {
+            Some(uuid) => ("SELECT id FROM disks WHERE volume_uuid = ?1", uuid),
+            None => (
+                "SELECT id FROM disks WHERE volume_uuid IS NULL AND name = ?1",
+                disk.name.as_str(),
+            ),
         };
-        for old in old_ids {
-            // Borrado del FTS externo: comando 'delete' fila por fila vía SELECT.
-            tx.execute(
-                "INSERT INTO entries_fts(entries_fts, rowid, name) \
-                 SELECT 'delete', id, name FROM entries WHERE disk_id = ?1",
-                params![old],
-            )?;
-            // Limpiar datos derivados de las entradas que se van.
-            let derived = [
-                "DELETE FROM thumbnails WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
-                "DELETE FROM entry_tags WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
-                "DELETE FROM video_meta WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
-                "DELETE FROM video_frames WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
-                "DELETE FROM archive_entries WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
-            ];
-            for sql in derived {
-                tx.execute(sql, params![old])?;
-            }
-            tx.execute("DELETE FROM entries WHERE disk_id = ?1", params![old])?;
-            tx.execute("DELETE FROM disks WHERE id = ?1", params![old])?;
-            replaced = true;
+        let mut stmt = tx.prepare(sql)?;
+        let ids = stmt.query_map(params![key], |r| r.get::<_, i64>(0))?;
+        ids.collect::<Result<_, _>>()?
+    };
+    for old in old_ids {
+        // Borrado del FTS externo: comando 'delete' fila por fila vía SELECT.
+        tx.execute(
+            "INSERT INTO entries_fts(entries_fts, rowid, name) \
+             SELECT 'delete', id, name FROM entries WHERE disk_id = ?1",
+            params![old],
+        )?;
+        // Limpiar datos derivados de las entradas que se van.
+        let derived = [
+            "DELETE FROM thumbnails WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+            "DELETE FROM entry_tags WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+            "DELETE FROM video_meta WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+            "DELETE FROM video_frames WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+            "DELETE FROM archive_entries WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+        ];
+        for sql in derived {
+            tx.execute(sql, params![old])?;
         }
+        tx.execute("DELETE FROM entries WHERE disk_id = ?1", params![old])?;
+        tx.execute("DELETE FROM disks WHERE id = ?1", params![old])?;
+        replaced = true;
     }
 
     tx.execute(
@@ -411,7 +497,7 @@ pub fn ingest_scanned(
 /// Columnas comunes + conteo de hijos directos (subconsulta correlacionada).
 const ENTRY_COLS: &str = "e.id, e.disk_id, e.parent_id, e.name, e.is_folder, \
      e.size_logical, e.size_physical, e.created_at, e.modified_at, e.ext, e.comment, \
-     (SELECT COUNT(*) FROM entries c WHERE c.parent_id = e.id) AS child_count";
+     (SELECT COUNT(*) FROM entries c WHERE c.disk_id = e.disk_id AND c.parent_id = e.id) AS child_count";
 
 fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<EntryRow> {
     Ok(EntryRow {
@@ -449,6 +535,70 @@ pub fn delete_entry(conn: &mut Connection, entry_id: i64) -> DbResult<()> {
         "DELETE FROM entries WHERE id = ?1",
     ] {
         tx.execute(sql, params![entry_id])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Elimina una entrada y TODO su subárbol del catálogo (tras mover el original
+/// a la papelera). Limpia FTS y tablas derivadas. Sirve para archivos (subárbol
+/// de un solo nodo) y para carpetas (todos sus descendientes).
+pub fn delete_subtree(conn: &mut Connection, entry_id: i64) -> DbResult<()> {
+    let tx = conn.transaction()?;
+    // Ids del subárbol (incluye la raíz) vía CTE recursiva.
+    let ids: Vec<i64> = {
+        let mut stmt = tx.prepare(
+            "WITH RECURSIVE sub(id) AS (
+               SELECT id FROM entries WHERE id = ?1
+               UNION ALL
+               SELECT e.id FROM entries e JOIN sub ON e.parent_id = sub.id
+             )
+             SELECT id FROM sub",
+        )?;
+        let rows = stmt.query_map(params![entry_id], |r| r.get::<_, i64>(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for id in &ids {
+        // Quitar del índice FTS externo antes de borrar la fila.
+        tx.execute(
+            "INSERT INTO entries_fts(entries_fts, rowid, name) \
+             SELECT 'delete', id, name FROM entries WHERE id = ?1",
+            params![id],
+        )?;
+        for sql in [
+            "DELETE FROM thumbnails WHERE entry_id = ?1",
+            "DELETE FROM entry_tags WHERE entry_id = ?1",
+            "DELETE FROM video_meta WHERE entry_id = ?1",
+            "DELETE FROM video_frames WHERE entry_id = ?1",
+            "DELETE FROM archive_entries WHERE entry_id = ?1",
+            "DELETE FROM entries WHERE id = ?1",
+        ] {
+            tx.execute(sql, params![id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Quita un disco entero del catálogo (sus entradas, FTS y tablas derivadas).
+/// Útil para discos que ya no existen. No toca el original en el filesystem.
+pub fn delete_disk(conn: &mut Connection, disk_id: i64) -> DbResult<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO entries_fts(entries_fts, rowid, name) \
+         SELECT 'delete', id, name FROM entries WHERE disk_id = ?1",
+        params![disk_id],
+    )?;
+    for sql in [
+        "DELETE FROM thumbnails WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+        "DELETE FROM entry_tags WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+        "DELETE FROM video_meta WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+        "DELETE FROM video_frames WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+        "DELETE FROM archive_entries WHERE entry_id IN (SELECT id FROM entries WHERE disk_id = ?1)",
+        "DELETE FROM entries WHERE disk_id = ?1",
+        "DELETE FROM disks WHERE id = ?1",
+    ] {
+        tx.execute(sql, params![disk_id])?;
     }
     tx.commit()?;
     Ok(())
@@ -796,13 +946,37 @@ pub fn list_children(
     disk_id: i64,
     parent_id: Option<i64>,
 ) -> DbResult<Vec<EntryRow>> {
+    // Saltar el nodo-volumen redundante: el disco YA representa el volumen, así
+    // que si la raíz del disco tiene un único nodo (el volumen escaneado),
+    // devolvemos directamente sus hijos. Evita que el disco aparezca anidado
+    // dentro de una carpeta con su mismo nombre. (Las rutas y la resolución del
+    // original siguen incluyendo el nombre del volumen, intactas.)
+    let effective_parent = match parent_id {
+        Some(p) => Some(p),
+        None => {
+            let roots: Vec<(i64, bool)> = {
+                let mut s = conn.prepare(
+                    "SELECT id, is_folder FROM entries WHERE disk_id = ?1 AND parent_id IS NULL",
+                )?;
+                let rows = s.query_map(params![disk_id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0))
+                })?;
+                rows.collect::<Result<_, _>>()?
+            };
+            if roots.len() == 1 && roots[0].1 {
+                Some(roots[0].0)
+            } else {
+                None
+            }
+        }
+    };
     let sql = format!(
         "SELECT {ENTRY_COLS} FROM entries e \
          WHERE e.disk_id = ?1 AND e.parent_id IS ?2 \
          ORDER BY e.is_folder DESC, e.name COLLATE NOCASE ASC"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![disk_id, parent_id], row_to_entry)?;
+    let rows = stmt.query_map(params![disk_id, effective_parent], row_to_entry)?;
     rows.collect()
 }
 
@@ -1088,28 +1262,21 @@ pub fn stats(conn: &Connection, disk_id: Option<i64>) -> DbResult<Stats> {
         None => ("", false),
     };
 
-    let file_count: i64 = {
-        let sql = format!("SELECT COUNT(*) FROM entries e WHERE e.is_folder = 0{scope}");
-        if has_scope {
-            conn.query_row(&sql, params![disk_id.unwrap()], |r| r.get(0))?
+    // Totales: leídos de la tabla `disks` (instantáneo), no escaneando millones
+    // de filas de `entries`. file_count/folder_count/total_size se guardan al
+    // ingestar cada disco.
+    let (file_count, folder_count, total_size): (i64, i64, i64) = {
+        let sql = if has_scope {
+            "SELECT COALESCE(file_count,0), COALESCE(folder_count,0), COALESCE(total_size,0) \
+             FROM disks WHERE id = ?1"
         } else {
-            conn.query_row(&sql, [], |r| r.get(0))?
-        }
-    };
-    let folder_count: i64 = {
-        let sql = format!("SELECT COUNT(*) FROM entries e WHERE e.is_folder = 1{scope}");
+            "SELECT COALESCE(SUM(file_count),0), COALESCE(SUM(folder_count),0), COALESCE(SUM(total_size),0) \
+             FROM disks"
+        };
         if has_scope {
-            conn.query_row(&sql, params![disk_id.unwrap()], |r| r.get(0))?
+            conn.query_row(sql, params![disk_id.unwrap()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         } else {
-            conn.query_row(&sql, [], |r| r.get(0))?
-        }
-    };
-    let total_size: i64 = {
-        let sql = format!("SELECT COALESCE(SUM(e.size_logical),0) FROM entries e WHERE e.is_folder = 0{scope}");
-        if has_scope {
-            conn.query_row(&sql, params![disk_id.unwrap()], |r| r.get(0))?
-        } else {
-            conn.query_row(&sql, [], |r| r.get(0))?
+            conn.query_row(sql, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         }
     };
 
@@ -1297,21 +1464,15 @@ mod tests {
         ingest_disks(&mut conn, &[sample_disk()]).unwrap();
         let disk_id: i64 = conn.query_row("SELECT id FROM disks", [], |r| r.get(0)).unwrap();
 
-        // Raíz del disco = el nodo volumen.
+        // Raíz del disco = se SALTA el nodo volumen y se ven sus hijos directos (CLIP).
         let root = list_children(&conn, disk_id, None).unwrap();
         assert_eq!(root.len(), 1);
-        assert_eq!(root[0].name, "SF28");
+        assert_eq!(root[0].name, "CLIP");
         assert!(root[0].is_folder);
-        assert_eq!(root[0].child_count, 1); // contiene CLIP
-
-        // Hijos del volumen: CLIP.
-        let lvl1 = list_children(&conn, disk_id, Some(root[0].id)).unwrap();
-        assert_eq!(lvl1.len(), 1);
-        assert_eq!(lvl1[0].name, "CLIP");
-        assert_eq!(lvl1[0].child_count, 2);
+        assert_eq!(root[0].child_count, 2); // contiene los 2 archivos
 
         // Hijos de CLIP: dos archivos, ordenados por nombre.
-        let lvl2 = list_children(&conn, disk_id, Some(lvl1[0].id)).unwrap();
+        let lvl2 = list_children(&conn, disk_id, Some(root[0].id)).unwrap();
         assert_eq!(lvl2.len(), 2);
         assert!(!lvl2[0].is_folder);
         assert_eq!(lvl2[0].name, "B-ROLL.MOV"); // B antes que C
@@ -1644,6 +1805,27 @@ mod tests {
     }
 
     #[test]
+    fn delete_subtree_removes_folder_and_descendants() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk()]).unwrap();
+        let clip: i64 = conn.query_row("SELECT id FROM entries WHERE name='CLIP'", [], |r| r.get(0)).unwrap();
+        let file: i64 = conn.query_row("SELECT id FROM entries WHERE name='C0001.MP4'", [], |r| r.get(0)).unwrap();
+        add_entry_tag(&conn, file, "boda").unwrap();
+        store_thumbnail(&conn, file, &[1, 2, 3], 4, 4).unwrap();
+
+        // Borrar la carpeta debe arrastrar a todos sus descendientes (y derivadas).
+        delete_subtree(&mut conn, clip).unwrap();
+
+        let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(remaining, 1, "solo debe quedar la raíz del disco");
+        assert_eq!(search(&conn, "C0001", 10).unwrap().total, 0, "el FTS no debe retener al hijo");
+        let th: i64 = conn.query_row("SELECT COUNT(*) FROM thumbnails", [], |r| r.get(0)).unwrap();
+        let tg: i64 = conn.query_row("SELECT COUNT(*) FROM entry_tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(th, 0);
+        assert_eq!(tg, 0);
+    }
+
+    #[test]
     fn rescan_clears_thumbnails_and_tags() {
         let mut conn = open_in_memory().unwrap();
         ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28").unwrap();
@@ -1679,5 +1861,25 @@ mod tests {
         // El FTS no quedó con fantasmas del disco viejo.
         let res = search(&conn, "C0001", 10).unwrap();
         assert_eq!(res.total, 1);
+    }
+
+    #[test]
+    fn rescan_without_fingerprint_dedupes_by_name() {
+        // Discos exFAT/NTFS sin Volume UUID: el re-escaneo debe reemplazar por
+        // nombre (entre los discos sin fingerprint), no acumular duplicados.
+        let mut conn = open_in_memory().unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41").unwrap();
+        let r2 = ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41").unwrap();
+        assert!(r2.replaced);
+        let same_name: i64 = conn
+            .query_row("SELECT COUNT(*) FROM disks WHERE name = ?1", params![sample_disk().name], |r| r.get(0))
+            .unwrap();
+        assert_eq!(same_name, 1);
+        // Un disco con fingerprint y mismo nombre no debe ser tocado por el
+        // re-escaneo sin fingerprint (identidad por UUID tiene prioridad).
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-X"), "ssd", None, "/Volumes/SF41").unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41").unwrap();
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 2); // uno con UUID-X + uno sin fingerprint
     }
 }

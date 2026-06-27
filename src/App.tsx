@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { HardDrive, Database, Import, FolderOpen, Loader2, ScanLine, Usb, X, Share2 } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { HardDrive, Database, Import, FolderOpen, Loader2, ScanLine, Usb, X, Share2, Languages } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   api,
@@ -14,6 +15,8 @@ import {
 } from "./lib/ipc";
 import { formatBytes, formatCount } from "./lib/format";
 import { useCatalog } from "./store/catalog";
+import { useT, useI18n } from "./lib/i18n";
+import { localizeError } from "./lib/errors";
 import { ScanDialog } from "./components/ScanDialog";
 import { Sidebar } from "./components/Sidebar";
 import { ContentTable } from "./components/ContentTable";
@@ -21,38 +24,59 @@ import { ContentToolbar } from "./components/ContentToolbar";
 import { Inspector } from "./components/Inspector";
 import { SearchBar } from "./components/SearchBar";
 import { ShareDialog } from "./components/ShareDialog";
+import { Splash } from "./components/Splash";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider, Hint } from "@/components/ui/tooltip";
 
 function App() {
-  const { disks, error, loading, lastImport, catalogPath, setImportResult, setError, setLoading } =
-    useCatalog();
+  const t = useT();
+  const lang = useI18n((s) => s.lang);
+  const toggleLang = useI18n((s) => s.toggle);
+  const { disks, error, loading, lastImport, catalogPath, setError, setLoading } = useCatalog();
   const openCatalogs = useCatalog((s) => s.openCatalogs);
   // Sesión guardada (catálogos abiertos) leída una sola vez al montar.
   const [savedSession] = useState(() => localStorage.getItem("diskdex:session"));
   const [status, setStatus] = useState<string>("");
   // Qué hacer DESPUÉS de escanear (cacheo pesado): el usuario decide. En discos
   // grandes/lentos (exFAT, NAS) conviene desactivar lo que no necesita.
-  const [postScan, setPostScan] = useState({ thumbnails: true, videos: true, archives: true });
+  // Previews on-demand por defecto: NO generar todas las miniaturas/frames al
+  // escanear (lento). Se generan al pararse en un archivo (rápido). El indexado de
+  // archivos comprimidos sí queda activo (no es un "preview", da valor offline).
+  const [postScan, setPostScan] = useState({ thumbnails: false, videos: false, archives: true, excludeJunk: true });
   // Escaneos en curso, indexados por mount path (permite varios simultáneos).
-  const [scanning, setScanning] = useState<Record<string, ScanProgress>>({});
+  // `cancelling` marca que ya se pidió cancelar (feedback inmediato en la barra).
+  const [scanning, setScanning] = useState<
+    Record<string, ScanProgress & { cancelling?: boolean; name?: string }>
+  >({});
   const [indexProg, setIndexProg] = useState<IndexProgress | null>(null);
   const [scanOpen, setScanOpen] = useState(false);
   const [detected, setDetected] = useState<VolumeInfo | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [splash, setSplash] = useState(true);
   const catalogPathRef = useRef<string | null>(null);
   catalogPathRef.current = catalogPath;
 
   useEffect(() => {
-    api.ping().then((p) => p !== "pong" && setStatus(`IPC inesperada: ${p}`));
+    api.ping().then((p) => p !== "pong" && setStatus(t("app.ipcUnexpected", { p })));
     api.startVolumeWatch();
     const unlisteners = [
       onVolumeAdded((v) => setDetected(v)),
       onVolumeRemoved(() => {
         if (catalogPathRef.current) useCatalog.getState().refreshOnlineFromDisk();
       }),
-      onScanProgress((p) => setScanning((prev) => ({ ...prev, [p.mount]: p }))),
+      onScanProgress((p) =>
+        setScanning((prev) => ({
+          ...prev,
+          // Preservar nombre y estado de cancelación (el evento solo trae mount/count/pct).
+          [p.mount]: { ...p, name: prev[p.mount]?.name, cancelling: prev[p.mount]?.cancelling },
+        }))
+      ),
       onIndexProgress((p) => setIndexProg(p.done >= p.total ? null : p)),
+      // Acciones desde el icono del tray (menú): abrir escaneo / enfocar búsqueda.
+      listen("tray://scan", () => setScanOpen(true)),
+      listen("tray://search", () => {
+        setTimeout(() => document.getElementById("diskdex-search")?.focus(), 50);
+      }),
     ];
     // Desactivar el menú contextual del navegador (Inspect/Search…) salvo en
     // campos de texto, donde el copiar/pegar nativo sí es útil.
@@ -68,47 +92,64 @@ function App() {
     };
   }, []);
 
-  // Reabrir el último catálogo usado al iniciar (en vez de crear uno nuevo).
+  // Reabrir el último catálogo usado al iniciar. Fuente durable: archivo de
+  // sesión del backend (sobrevive cierres y no depende del localStorage del
+  // webview). Fallback: localStorage (migración). NUNCA borra la sesión ante un
+  // error transitorio (p.ej. el .dccat en Dropbox sincronizando) — así no se
+  // pierde el catálogo: solo avisa y el usuario reintenta.
   useEffect(() => {
-    if (!savedSession) return;
     let cancelled = false;
-    try {
-      const data = JSON.parse(savedSession) as { catalogPath?: string; openCatalogs?: string[] };
-      if (!data.catalogPath) return;
-      api
-        .openCatalog(data.catalogPath)
-        .then(() => {
-          if (cancelled) return;
-          (data.openCatalogs ?? []).forEach((p) => useCatalog.getState().addOpenCatalog(p));
-          useCatalog.getState().addOpenCatalog(data.catalogPath!);
-          useCatalog.setState({ catalogPath: data.catalogPath! });
-          return useCatalog.getState().refreshOnlineFromDisk();
-        })
-        .catch(() => localStorage.removeItem("diskdex:session"));
-    } catch {
-      localStorage.removeItem("diskdex:session");
-    }
+    (async () => {
+      let raw: string | null = null;
+      try {
+        raw = await api.loadSession();
+      } catch {
+        /* ignore */
+      }
+      if (!raw) raw = savedSession; // migración desde localStorage
+      if (!raw || cancelled) return;
+      let data: { catalogPath?: string; openCatalogs?: string[] };
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      if (!data.catalogPath || cancelled) return;
+      try {
+        await api.openCatalog(data.catalogPath);
+        if (cancelled) return;
+        (data.openCatalogs ?? []).forEach((p) => useCatalog.getState().addOpenCatalog(p));
+        useCatalog.getState().addOpenCatalog(data.catalogPath);
+        useCatalog.setState({ catalogPath: data.catalogPath });
+        await useCatalog.getState().refreshOnlineFromDisk();
+      } catch {
+        if (!cancelled) setStatus(t("app.reopenFailed", { path: data.catalogPath }));
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [savedSession]);
+  }, []);
 
-  // Persistir la sesión (catálogos abiertos + activo) para reabrirla la próxima vez.
+  // Persistir la sesión en cada cambio (catálogos abiertos + activo). Se guarda
+  // en disco vía backend (durable) y en localStorage (fallback/migración).
   useEffect(() => {
-    if (catalogPath) {
-      localStorage.setItem(
-        "diskdex:session",
-        JSON.stringify({ catalogPath, openCatalogs: openCatalogs.map((c) => c.path) })
-      );
+    if (!catalogPath) return;
+    const json = JSON.stringify({ catalogPath, openCatalogs: openCatalogs.map((c) => c.path) });
+    try {
+      localStorage.setItem("diskdex:session", json);
+    } catch {
+      /* ignore */
     }
+    api.saveSession(json).catch(() => {});
   }, [catalogPath, openCatalogs]);
 
   async function ensureCatalog(): Promise<boolean> {
     if (catalogPathRef.current) return true;
     const path = await save({
-      title: "Crear un catálogo nuevo para guardar el escaneo",
+      title: t("app.dlgNewCatalogTitle"),
       defaultPath: "catalog.dccat",
-      filters: [{ name: "Catálogo DiskDex", extensions: ["dccat"] }],
+      filters: [{ name: t("app.dlgCatalogFilter"), extensions: ["dccat"] }],
     });
     if (!path) return false;
     await api.openCatalog(path);
@@ -120,30 +161,41 @@ function App() {
   async function handleImport() {
     setError(null);
     const dcmfPath = await open({
-      title: "Elegí un catálogo (.dcmf) para importar",
-      filters: [{ name: "Catálogo (.dcmf)", extensions: ["dcmf", "dcmd"] }],
+      title: t("app.dlgPickDcmfTitle"),
+      filters: [{ name: t("app.dlgDcmfFilter"), extensions: ["dcmf", "dcmd"] }],
       multiple: false,
       directory: false,
     });
     if (!dcmfPath || typeof dcmfPath !== "string") return;
-    const catalogPath = await save({
-      title: "Guardar catálogo como…",
-      defaultPath: "catalog.dccat",
-      filters: [{ name: "Catálogo DiskDex", extensions: ["dccat"] }],
-    });
-    if (!catalogPath) return;
+
+    // Importa DENTRO del catálogo abierto. Si no hay ninguno, crea uno primero.
+    if (!(await ensureCatalog())) return;
 
     setLoading(true);
-    setStatus("Importando… (inflando bloques y poblando SQLite)");
+    setStatus(t("app.importing"));
     try {
-      const summary = await api.importDcmf(dcmfPath, catalogPath);
-      await setImportResult(summary);
-      useCatalog.getState().addOpenCatalog(summary.catalog_path);
+      // Detectar conflictos (discos del .dcmf que ya existen) y preguntar.
+      let replace = false;
+      try {
+        const names = await api.dcmfDiskNames(dcmfPath);
+        const existing = new Set(useCatalog.getState().disks.map((d) => d.name));
+        const conflicts = names.filter((n) => existing.has(n));
+        if (conflicts.length > 0) {
+          replace = window.confirm(t("app.importConflict", { disks: conflicts.join(", ") }));
+        }
+      } catch {
+        /* si falla el preview, importa igual sin reemplazar */
+      }
+
+      const summary = await api.importDcmfMerge(dcmfPath, replace);
+      await useCatalog.getState().refreshDisks();
       await useCatalog.getState().refreshOnlineFromDisk();
       setStatus(
-        `Importado: ${summary.disks} discos, ${formatCount(summary.entries)} entradas en ${(
-          summary.elapsed_ms / 1000
-        ).toFixed(1)} s`
+        t("app.imported", {
+          disks: summary.disks,
+          entries: formatCount(summary.entries),
+          secs: (summary.elapsed_ms / 1000).toFixed(1),
+        })
       );
     } catch (e) {
       setError(String(e));
@@ -156,8 +208,8 @@ function App() {
   async function handleOpen() {
     setError(null);
     const path = await open({
-      title: "Abrir catálogo .dccat",
-      filters: [{ name: "Catálogo DiskDex", extensions: ["dccat"] }],
+      title: t("app.dlgOpenTitle"),
+      filters: [{ name: t("app.dlgCatalogFilter"), extensions: ["dccat"] }],
       multiple: false,
       directory: false,
     });
@@ -168,7 +220,7 @@ function App() {
       useCatalog.setState({ catalogPath: path });
       useCatalog.getState().addOpenCatalog(path);
       await useCatalog.getState().refreshOnlineFromDisk();
-      setStatus(`Catálogo abierto: ${path}`);
+      setStatus(t("app.opened", { path }));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -180,16 +232,23 @@ function App() {
     setError(null);
     if (scanning[mountPath]) return; // ya se está escaneando este disco
     if (!(await ensureCatalog())) return;
-    setScanning((prev) => ({ ...prev, [mountPath]: { mount: mountPath, count: 0, pct: -1 } }));
-    setStatus(`Escaneando ${name}…`);
+    setScanning((prev) => ({ ...prev, [mountPath]: { mount: mountPath, count: 0, pct: -1, name } }));
+    setStatus(t("app.scanning", { name }));
     try {
-      const r = await api.scanDisk(mountPath, name);
+      const r = await api.scanDisk(mountPath, name, { exclude_junk: postScan.excludeJunk });
       await useCatalog.getState().refreshDisks();
       await useCatalog.getState().refreshOnlineFromDisk();
       setStatus(
-        `${r.replaced ? "Re-escaneado" : "Escaneado"} ${r.name}: ${formatCount(
-          r.entries
-        )} entradas (${formatCount(r.files)} archivos) en ${(r.elapsed_ms / 1000).toFixed(1)} s`
+        t("app.scannedDone", {
+          verb: r.replaced ? t("app.verbRescanned") : t("app.verbScanned"),
+          name: r.name,
+          entries: formatCount(r.entries),
+          files: formatCount(r.files),
+          secs: (r.elapsed_ms / 1000).toFixed(1),
+        }) +
+          (r.reused_dirs > 0
+            ? t("app.scannedIncremental", { n: formatCount(r.reused_dirs) })
+            : "")
       );
       setScanOpen(false);
       setDetected(null);
@@ -200,18 +259,25 @@ function App() {
         void (async () => {
           try {
             if (postScan.thumbnails) {
-              const t = await api.cacheDiskThumbnails(r.disk_id);
-              if (t.generated > 0) setStatus(`${formatCount(t.generated)} miniaturas cacheadas en ${name}`);
+              const tb = await api.cacheDiskThumbnails(r.disk_id);
+              if (tb.generated > 0)
+                setStatus(t("app.thumbsCached", { n: formatCount(tb.generated), name }));
             }
             if (postScan.videos) {
               const v = await api.indexDiskVideos(r.disk_id);
               if (v.indexed > 0)
-                setStatus(`${formatCount(v.indexed)} videos analizados en ${name} (${formatCount(v.frames)} frames)`);
+                setStatus(
+                  t("app.videosAnalyzed", {
+                    n: formatCount(v.indexed),
+                    name,
+                    frames: formatCount(v.frames),
+                  })
+                );
             }
             if (postScan.archives) {
               const a = await api.indexDiskArchives(r.disk_id);
               if (a.indexed > 0)
-                setStatus(`${formatCount(a.indexed)} archivos comprimidos indexados en ${name}`);
+                setStatus(t("app.archivesIndexed", { n: formatCount(a.indexed), name }));
             }
           } catch {
             /* el indexado es best-effort; no interrumpe el flujo */
@@ -221,8 +287,13 @@ function App() {
         })();
       }
     } catch (e) {
-      setError(String(e));
-      setStatus("");
+      // La cancelación a pedido no es un error: se informa como estado.
+      if (String(e).toLowerCase().includes("cancel")) {
+        setStatus(t("app.scanCancelled", { name }));
+      } else {
+        setError(String(e));
+        setStatus("");
+      }
     } finally {
       setScanning((prev) => {
         const next = { ...prev };
@@ -232,10 +303,19 @@ function App() {
     }
   }
 
+  function handleCancelScan(mountPath: string) {
+    api.cancelScan(mountPath).catch(() => {});
+    // Feedback inmediato: marcar la barra como "cancelando…".
+    setScanning((prev) =>
+      prev[mountPath] ? { ...prev, [mountPath]: { ...prev[mountPath], cancelling: true } } : prev
+    );
+  }
+
   const hasCatalog = disks.length > 0;
 
   return (
     <TooltipProvider delayDuration={350} skipDelayDuration={120}>
+    {splash && <Splash onDone={() => setSplash(false)} />}
     <div className="flex h-full flex-col bg-neutral-950 text-neutral-200">
       <header className="flex items-center gap-3 border-b border-border bg-gradient-to-b from-neutral-900/80 to-neutral-950 px-4 py-2 shadow-[0_1px_0_0_rgba(255,255,255,0.03)]">
         <div className="flex shrink-0 items-center gap-2">
@@ -248,20 +328,30 @@ function App() {
         <div className="flex shrink-0 items-center gap-1.5">
           <Button variant="accent" onClick={() => setScanOpen(true)} disabled={loading}>
             <ScanLine />
-            Escanear
+            {t("app.scan")}
           </Button>
           <Button onClick={handleImport} disabled={loading}>
             {loading ? <Loader2 className="animate-spin" /> : <Import />}
-            Importar
+            {t("app.import")}
           </Button>
           <Button variant="outline" onClick={handleOpen} disabled={loading}>
             <FolderOpen />
-            Abrir
+            {t("app.open")}
           </Button>
-          <Hint label="Conector remoto seguro">
-            <Button variant="ghost" size="icon" onClick={() => setShareOpen(true)} aria-label="Compartir">
+          <Hint label={t("app.shareTip")}>
+            <Button variant="ghost" size="icon" onClick={() => setShareOpen(true)} aria-label={t("app.share")}>
               <Share2 />
             </Button>
+          </Hint>
+          <Hint label={t("app.langTip")}>
+            <button
+              onClick={toggleLang}
+              aria-label={t("app.langTip")}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:bg-accent/60 hover:text-neutral-200"
+            >
+              <Languages className="h-4 w-4" />
+              {lang.toUpperCase()}
+            </button>
           </Hint>
         </div>
       </header>
@@ -269,7 +359,7 @@ function App() {
       <TabBar />
 
       {detected && (
-        <DetectBanner
+        <DetectDialog
           volume={detected}
           busy={!!scanning[detected.mount_path]}
           onScan={() => handleScan(detected.mount_path, detected.name)}
@@ -279,14 +369,24 @@ function App() {
 
       {(error || (status && !error)) && (
         <div className="border-b border-neutral-800 px-4 py-1.5 text-xs">
-          {error ? <span className="text-red-300">{error}</span> : <span className="text-neutral-400">{status}</span>}
+          {error ? (
+            <span className="text-red-300">{localizeError(error, t)}</span>
+          ) : (
+            <span className="text-neutral-400">{status}</span>
+          )}
         </div>
       )}
 
       {(Object.keys(scanning).length > 0 || indexProg) && (
         <div className="space-y-1.5 border-b border-border bg-neutral-900/40 px-4 py-1.5">
           {Object.values(scanning).map((s) => (
-            <ScanProgressBar key={s.mount} progress={s} />
+            <ScanProgressBar
+              key={s.mount}
+              progress={s}
+              name={s.name}
+              cancelling={s.cancelling}
+              onCancel={() => handleCancelScan(s.mount)}
+            />
           ))}
           {indexProg && <ProgressBar progress={indexProg} />}
         </div>
@@ -296,7 +396,7 @@ function App() {
       {hasCatalog ? (
         <div className="grid flex-1 grid-cols-[260px_1fr_320px] overflow-hidden">
           <aside className="overflow-auto border-r border-neutral-800">
-            <Sidebar />
+            <Sidebar onRescan={handleScan} />
           </aside>
           <section className="flex flex-col overflow-hidden border-r border-neutral-800">
             <ContentToolbar />
@@ -315,9 +415,9 @@ function App() {
       )}
 
       <footer className="flex items-center gap-2 border-t border-neutral-800 px-4 py-1.5 text-[11px] text-neutral-500">
-        {catalogPath ? <span className="font-mono">{catalogPath}</span> : <span>Sin catálogo abierto</span>}
+        {catalogPath ? <span className="font-mono">{catalogPath}</span> : <span>{t("app.noCatalog")}</span>}
         {lastImport && (
-          <span>· {lastImport.disks} discos · {formatCount(lastImport.entries)} entradas</span>
+          <span>{t("app.footerImport", { disks: lastImport.disks, entries: formatCount(lastImport.entries) })}</span>
         )}
         <button
           onClick={() => openUrl("https://exitmedia.com.ar")}
@@ -327,7 +427,7 @@ function App() {
           Desarrollado por Pablo Goldberg · <span className="font-medium text-neutral-400">ExitMedia</span>
         </button>
         {hasCatalog && <span className="text-neutral-600">·</span>}
-        {hasCatalog && <span>{disks.length} discos en el catálogo</span>}
+        {hasCatalog && <span>{t("app.disksInCatalog", { n: disks.length })}</span>}
       </footer>
 
       {scanOpen && (
@@ -345,20 +445,21 @@ function App() {
   );
 }
 
-const PHASE_LABELS: Record<IndexProgress["phase"], string> = {
-  thumbnails: "Generando miniaturas",
-  videos: "Analizando videos",
-  archives: "Indexando archivos comprimidos",
+const PHASE_KEYS: Record<IndexProgress["phase"], string> = {
+  thumbnails: "app.phaseThumbnails",
+  videos: "app.phaseVideos",
+  archives: "app.phaseArchives",
 };
 
 function ProgressBar({ progress }: { progress: IndexProgress }) {
+  const t = useT();
   const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
   return (
     <div>
       <div className="flex items-center justify-between text-[11px] text-neutral-400">
         <span className="flex items-center gap-1.5">
           <Loader2 className="h-3 w-3 animate-spin text-primary" />
-          {PHASE_LABELS[progress.phase]}…
+          {t(PHASE_KEYS[progress.phase])}…
         </span>
         <span className="font-mono text-neutral-300">
           {formatCount(progress.done)} / {formatCount(progress.total)} ({pct}%)
@@ -374,28 +475,69 @@ function ProgressBar({ progress }: { progress: IndexProgress }) {
   );
 }
 
-function ScanProgressBar({ progress }: { progress: ScanProgress }) {
-  const known = progress.pct >= 0;
-  const disk = progress.mount.split("/").filter(Boolean).pop() ?? progress.mount;
+function ScanProgressBar({
+  progress,
+  name,
+  cancelling,
+  onCancel,
+}: {
+  progress: ScanProgress;
+  name?: string;
+  cancelling?: boolean;
+  onCancel?: () => void;
+}) {
+  const t = useT();
+  // Preferir el nombre del disco; el mount puede ser "/" (volumen raíz).
+  const disk = name || progress.mount.split("/").filter(Boolean).pop() || progress.mount;
+  const saving = progress.pct === -2; // fase de guardado (ingesta en el catálogo)
   return (
     <div>
-      <div className="flex items-center justify-between text-[11px] text-neutral-400">
+      <div className="flex items-center justify-between gap-2 text-[11px] text-neutral-400">
         <span className="flex items-center gap-1.5">
           <Loader2 className="h-3 w-3 animate-spin text-primary" />
-          Escaneando <span className="text-neutral-200">{disk}</span>…
+          {cancelling ? (
+            <>{t("app.cancellingDisk")} <span className="text-neutral-200">{disk}</span>…</>
+          ) : saving ? (
+            <>{t("app.savingDisk")} <span className="text-neutral-200">{disk}</span>…</>
+          ) : (
+            <>{t("app.scanningDisk")} <span className="text-neutral-200">{disk}</span>…</>
+          )}
         </span>
-        <span className="font-mono text-neutral-300">
-          {formatCount(progress.count)} entradas{known ? ` · ${progress.pct}%` : ""}
+        <span className="flex items-center gap-2">
+          {/* Sin % (no es estimable de forma creíble durante el recorrido): mostramos
+              el conteo real de entradas, que es honesto y va subiendo. */}
+          <span className="font-mono text-neutral-300">
+            {t("app.scanningEntries", { count: formatCount(progress.count) })}
+          </span>
+          {onCancel && !saving && (
+            <button
+              onClick={onCancel}
+              disabled={cancelling}
+              className="inline-flex items-center gap-1 rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400 transition-colors hover:border-red-900/60 hover:bg-red-950/40 hover:text-red-300 disabled:opacity-50"
+              title={t("app.cancelScanTip")}
+            >
+              <X className="h-3 w-3" />
+              {t("common.cancel")}
+            </button>
+          )}
         </span>
       </div>
-      {known && (
-        <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-neutral-800">
+      {/* Barra verde que se llena por bytes recorridos (avance real, sin mostrar
+          el % numérico que confunde cuando quedan muchos archivos chicos). Si el
+          total se desconoce (escaneo de subcarpeta) → barra llena con pulso suave
+          (sin el haz que cruza, que distraía). */}
+      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-neutral-800">
+        {cancelling ? (
+          <div className="h-full w-1/3 rounded-full bg-neutral-600" />
+        ) : progress.pct >= 0 ? (
           <div
-            className="h-full rounded-full bg-primary transition-[width] duration-200"
+            className="h-full rounded-full bg-primary transition-[width] duration-300"
             style={{ width: `${progress.pct}%` }}
           />
-        </div>
-      )}
+        ) : (
+          <div className="h-full w-full animate-pulse rounded-full bg-primary/50" />
+        )}
+      </div>
     </div>
   );
 }
@@ -437,7 +579,8 @@ function TabBar() {
   );
 }
 
-function DetectBanner({
+/** Popup modal al detectar un disco nuevo montado: pregunta si escanearlo. */
+function DetectDialog({
   volume,
   busy,
   onScan,
@@ -448,39 +591,62 @@ function DetectBanner({
   onScan: () => void;
   onDismiss: () => void;
 }) {
+  const t = useT();
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onDismiss();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onDismiss]);
+
   return (
-    <div className="flex items-center gap-3 border-b border-amber-900/50 bg-amber-950/30 px-4 py-2 text-sm">
-      <Usb className="h-4 w-4 text-amber-400" />
-      <span>
-        Disco detectado: <span className="font-medium">{volume.name}</span>{" "}
-        <span className="text-neutral-400">({formatBytes(volume.total_space)})</span>
-      </span>
-      <div className="ml-auto flex items-center gap-2">
-        <button
-          onClick={onScan}
-          disabled={busy}
-          className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-60"
-        >
-          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          {busy ? "Escaneando…" : "Escanear ahora"}
-        </button>
-        <button onClick={onDismiss} className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200">
-          <X className="h-4 w-4" />
-        </button>
+    <div
+      className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50 p-4 animate-fade-in"
+      onClick={onDismiss}
+    >
+      <div
+        className="w-full max-w-sm rounded-xl border border-border bg-popover p-5 shadow-pop animate-zoom-in"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2.5">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-amber-500/15 ring-1 ring-amber-500/30">
+            <Usb className="h-5 w-5 text-amber-400" />
+          </span>
+          <h2 className="text-sm font-semibold text-neutral-100">{t("app.detectedTitle")}</h2>
+        </div>
+        <p className="mt-3 text-sm text-neutral-300">
+          {t("app.detectedBody", { name: volume.name, size: formatBytes(volume.total_space) })}
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            onClick={onDismiss}
+            disabled={busy}
+            className="rounded-md border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+          >
+            {t("app.later")}
+          </button>
+          <button
+            onClick={onScan}
+            disabled={busy}
+            className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-60"
+          >
+            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {busy ? t("app.scanningShort") : t("app.scanNow")}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
 function EmptyState() {
+  const t = useT();
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
       <HardDrive className="h-12 w-12 text-neutral-700" />
-      <h2 className="text-base font-medium text-neutral-300">No hay discos todavía</h2>
+      <h2 className="text-base font-medium text-neutral-300">{t("app.emptyTitle")}</h2>
       <p className="max-w-md text-sm text-neutral-500">
-<span className="text-sky-400">Escaneá un disco</span> conectado, abrí un catálogo{" "}
-        <span className="font-mono">.dccat</span> existente, o importá uno desde otro programa{" "}
-        (<span className="font-mono">.dcmf</span>). Cuando conectes un disco, aparece un aviso para escanearlo.
+        <span className="text-sky-400">{t("app.emptyScan")}</span>
+        {t("app.emptyBody", { dccat: ".dccat", dcmf: ".dcmf" })}
       </p>
     </div>
   );

@@ -3,8 +3,10 @@ import { Share2, Loader2, KeyRound, Smartphone, Ban, RotateCcw, Wifi, ShieldChec
 import { api, type AgentStatus, type DeviceRow } from "../lib/ipc";
 import { Modal } from "./StatsDialog";
 import { formatDate } from "../lib/format";
+import { useT } from "../lib/i18n";
 
 export function ShareDialog({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const [status, setStatus] = useState<AgentStatus>({ running: false, addr: null });
   const [busy, setBusy] = useState(false);
   const [code, setCode] = useState<string | null>(null);
@@ -57,7 +59,7 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal onClose={onClose} title="Compartir (conector seguro)" icon={<Share2 className="h-4 w-4 text-sky-400" />}>
+    <Modal onClose={onClose} title={t("share.title")} icon={<Share2 className="h-4 w-4 text-sky-400" />}>
       {error && <div className="mb-3 rounded border border-red-900 bg-red-950/50 px-3 py-2 text-xs text-red-300">{error}</div>}
 
       {/* Estado / toggle */}
@@ -65,10 +67,10 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
         <Wifi className={`h-5 w-5 ${status.running ? "text-emerald-400" : "text-neutral-600"}`} />
         <div className="flex-1">
           <div className="text-sm font-medium">
-            {status.running ? "Conector activo" : "Conector apagado"}
+            {status.running ? t("share.connectorActive") : t("share.connectorOff")}
           </div>
           <div className="font-mono text-[11px] text-neutral-500">
-            {status.running ? `escuchando en ${status.addr}` : "read-only · autenticado por dispositivo"}
+            {status.running ? t("share.listeningOn", { addr: String(status.addr) }) : t("share.readonlyAuth")}
           </div>
         </div>
         <button
@@ -79,7 +81,7 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
           }`}
         >
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          {status.running ? "Apagar" : "Activar"}
+          {status.running ? t("share.turnOff") : t("share.turnOn")}
         </button>
       </div>
 
@@ -87,14 +89,14 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
         <div className="mt-3 flex items-center gap-3 rounded-lg border border-neutral-800 p-3">
           <KeyRound className="h-5 w-5 text-amber-400" />
           <div className="flex-1">
-            <div className="text-sm">Emparejar un dispositivo</div>
-            <div className="text-[11px] text-neutral-500">Ingresá este código en el otro dispositivo (vale 5 min, un solo uso).</div>
+            <div className="text-sm">{t("share.pairDevice")}</div>
+            <div className="text-[11px] text-neutral-500">{t("share.pairHelp")}</div>
           </div>
           {code ? (
             <span className="rounded bg-neutral-800 px-3 py-1.5 font-mono text-lg tracking-[0.3em] text-emerald-300">{code}</span>
           ) : (
             <button onClick={genCode} className="rounded-md border border-neutral-700 px-3 py-1.5 text-xs hover:bg-neutral-800">
-              Generar código
+              {t("share.generateCode")}
             </button>
           )}
         </div>
@@ -103,10 +105,10 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
       {/* Dispositivos */}
       <div className="mt-4">
         <h3 className="mb-2 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-neutral-500">
-          <Smartphone className="h-3.5 w-3.5" /> Dispositivos enrolados
+          <Smartphone className="h-3.5 w-3.5" /> {t("share.enrolledDevices")}
         </h3>
         {devices.length === 0 ? (
-          <p className="py-3 text-center text-xs text-neutral-600">Todavía no hay dispositivos.</p>
+          <p className="py-3 text-center text-xs text-neutral-600">{t("share.noDevices")}</p>
         ) : (
           <div className="space-y-1">
             {devices.map((d) => (
@@ -115,16 +117,16 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{d.name} <span className="font-mono text-neutral-600">{d.id.slice(0, 8)}</span></div>
                   <div className="text-[10px] text-neutral-500">
-                    scopes: {d.scopes} · visto {d.last_seen ? formatDate(d.last_seen) : "—"}
+                    {t("share.scopes")}: {d.scopes} · {t("share.lastSeen")} {d.last_seen ? formatDate(d.last_seen) : "—"}
                   </div>
                 </div>
                 <button
                   onClick={() => revoke(d)}
                   className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-neutral-800"
-                  title={d.revoked ? "Re-habilitar" : "Revocar"}
+                  title={d.revoked ? t("share.reEnable") : t("share.revoke")}
                 >
                   {d.revoked ? <RotateCcw className="h-3.5 w-3.5 text-emerald-400" /> : <Ban className="h-3.5 w-3.5 text-red-400" />}
-                  {d.revoked ? "Re-habilitar" : "Revocar"}
+                  {d.revoked ? t("share.reEnable") : t("share.revoke")}
                 </button>
               </div>
             ))}
@@ -134,11 +136,7 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
 
       <div className="mt-4 flex gap-2 rounded-lg border border-neutral-800 bg-neutral-900/40 p-3 text-[11px] text-neutral-500">
         <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-400" />
-        <p>
-          Solo lectura. Sirve únicamente archivos del catálogo cuyo volumen esté montado y verificado por fingerprint;
-          rechaza rutas fuera del volumen. Por defecto escucha en loopback — para acceso remoto, ligalo a una malla
-          privada (Tailscale/WireGuard) o un túnel TLS. Toda descarga queda en el log de auditoría.
-        </p>
+        <p>{t("share.securityNote")}</p>
       </div>
     </Modal>
   );

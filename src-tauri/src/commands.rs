@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// Estado global: el catálogo SQLite actualmente abierto.
 #[derive(Default)]
@@ -53,6 +53,28 @@ pub struct DiskRow {
     pub comment: Option<String>,
 }
 
+/// Detalle de un disco para el panel de info (sección 11): fecha del último
+/// escaneo, capacidad cataloga y —si está montado— espacio total/libre en vivo.
+#[derive(Serialize)]
+pub struct DiskDetail {
+    pub id: i64,
+    pub name: String,
+    /// Suma de tamaños lógicos cataloga (lo que ocupan los archivos indexados).
+    pub total_size: i64,
+    pub file_count: i64,
+    pub folder_count: i64,
+    pub is_online: bool,
+    pub kind: Option<String>,
+    /// Capacidad del volumen guardada al escanear (puede faltar en catálogos viejos).
+    pub capacity: Option<i64>,
+    /// Unix (segundos) del último escaneo de este disco.
+    pub scanned_at: Option<i64>,
+    /// Capacidad real del volumen montado ahora (solo si está online).
+    pub live_total: Option<i64>,
+    /// Espacio libre real del volumen montado ahora (solo si está online).
+    pub live_free: Option<i64>,
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -60,8 +82,37 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// Mount paths con cancelación pendiente. Registro global (no hace falta plomería
+/// por `AppState`): el escaneo consulta acá y `cancel_scan` agrega. Soporta varios
+/// escaneos simultáneos.
+static SCAN_CANCELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn cancel_requested(mount_path: &str) -> bool {
+    SCAN_CANCELS
+        .lock()
+        .map(|v| v.iter().any(|m| m == mount_path))
+        .unwrap_or(false)
+}
+
+fn clear_cancel(mount_path: &str) {
+    if let Ok(mut v) = SCAN_CANCELS.lock() {
+        v.retain(|m| m != mount_path);
+    }
+}
+
+/// Pide cancelar el escaneo en curso de `mount_path`. El escaneo aborta en el
+/// próximo chequeo (entre carpetas o cada ~4096 entradas) y no ingesta nada.
+#[tauri::command(async)]
+pub fn cancel_scan(mount_path: String) {
+    if let Ok(mut v) = SCAN_CANCELS.lock() {
+        if !v.iter().any(|m| m == &mount_path) {
+            v.push(mount_path);
+        }
+    }
+}
+
 /// M0: sanity check de la IPC.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ping() -> String {
     "pong".into()
 }
@@ -109,7 +160,7 @@ pub struct DeviceRow {
 
 /// Arranca el agente sobre el catálogo abierto. `bind` por defecto loopback;
 /// para una malla, pasar la IP de la interfaz (Tailscale/WireGuard).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_start(
     state: tauri::State<'_, AppState>,
     bind: Option<String>,
@@ -138,7 +189,7 @@ pub fn agent_start(
 }
 
 /// Detiene el agente.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_stop(state: tauri::State<'_, AppState>) -> Result<(), String> {
     if let Some(handle) = state.agent.lock().unwrap().take() {
         handle.stop();
@@ -146,7 +197,7 @@ pub fn agent_stop(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_status(state: tauri::State<'_, AppState>) -> AgentStatus {
     let guard = state.agent.lock().unwrap();
     match guard.as_ref() {
@@ -156,7 +207,7 @@ pub fn agent_status(state: tauri::State<'_, AppState>) -> AgentStatus {
 }
 
 /// Genera un código de emparejamiento (válido 5 min) para enrolar un dispositivo.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_pair_code(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let guard = state.agent.lock().unwrap();
     let h = guard.as_ref().ok_or("el conector no está activo")?;
@@ -164,7 +215,7 @@ pub fn agent_pair_code(state: tauri::State<'_, AppState>) -> Result<String, Stri
 }
 
 /// Lista los dispositivos enrolados.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_devices(state: tauri::State<'_, AppState>) -> Result<Vec<DeviceRow>, String> {
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
@@ -188,7 +239,7 @@ pub fn agent_devices(state: tauri::State<'_, AppState>) -> Result<Vec<DeviceRow>
 }
 
 /// Revoca (o re-habilita) un dispositivo.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_revoke(
     state: tauri::State<'_, AppState>,
     device_id: String,
@@ -214,7 +265,7 @@ pub fn import_dcmf(
     catalog_path: String,
 ) -> Result<ImportSummary, String> {
     let t0 = now_ms();
-    let bytes = std::fs::read(&dcmf_path).map_err(|e| format!("no se pudo leer {dcmf_path}: {e}"))?;
+    let bytes = read_dcmf_bytes(&dcmf_path)?;
     let disks = dcmf::import_dcmf(&bytes);
     if disks.is_empty() {
         return Err("el archivo .dcmf no contiene discos reconocibles".into());
@@ -235,8 +286,111 @@ pub fn import_dcmf(
     })
 }
 
+/// Lee los bytes del `.dcmf`. DiskCatalogMaker a veces guarda el catálogo como
+/// PAQUETE (una carpeta `.dcmf` con un `Catalog.dcmf` adentro) en vez de archivo
+/// plano. Si el path es un directorio, busca el dato real adentro.
+fn read_dcmf_bytes(dcmf_path: &str) -> Result<Vec<u8>, String> {
+    let p = PathBuf::from(dcmf_path);
+    let file = if p.is_dir() {
+        let inner = p.join("Catalog.dcmf");
+        if inner.is_file() {
+            inner
+        } else {
+            // Fallback: el .dcmf/.dcmd más grande dentro del paquete.
+            std::fs::read_dir(&p)
+                .ok()
+                .and_then(|rd| {
+                    rd.filter_map(|e| e.ok().map(|e| e.path()))
+                        .filter(|x| {
+                            x.is_file()
+                                && x.extension()
+                                    .map(|e| e == "dcmf" || e == "dcmd")
+                                    .unwrap_or(false)
+                        })
+                        .max_by_key(|x| std::fs::metadata(x).map(|m| m.len()).unwrap_or(0))
+                })
+                .ok_or_else(|| "el paquete .dcmf no contiene un Catalog.dcmf".to_string())?
+        }
+    } else {
+        p
+    };
+    std::fs::read(&file).map_err(|e| format!("no se pudo leer {}: {e}", file.display()))
+}
+
+/// Nombres de los discos contenidos en un `.dcmf` (para previsualizar conflictos
+/// antes de importar al catálogo abierto).
+#[tauri::command(async)]
+pub fn dcmf_disk_names(dcmf_path: String) -> Result<Vec<String>, String> {
+    let bytes = read_dcmf_bytes(&dcmf_path)?;
+    Ok(dcmf::import_dcmf(&bytes).into_iter().map(|d| d.name).collect())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMergeArgs {
+    pub dcmf_path: String,
+    pub replace: bool,
+}
+
+/// Importa los discos de un `.dcmf` DENTRO del catálogo ABIERTO (no crea uno
+/// nuevo). Si un disco ya existe (por nombre): `replace=true` lo reemplaza,
+/// `replace=false` lo saltea (mantiene el actual). Devuelve cuántos importó.
+/// (Args en un struct único para evitar el borde de Tauri con varios args +
+/// State en comandos async.)
+#[tauri::command(async)]
+pub fn import_dcmf_merge(
+    state: tauri::State<'_, AppState>,
+    args: ImportMergeArgs,
+) -> Result<ImportSummary, String> {
+    let ImportMergeArgs { dcmf_path, replace } = args;
+    let t0 = now_ms();
+    let bytes = read_dcmf_bytes(&dcmf_path)?;
+    let disks = dcmf::import_dcmf(&bytes);
+    if disks.is_empty() {
+        return Err("el archivo .dcmf no contiene discos reconocibles".into());
+    }
+
+    let mut guard = state.catalog.lock().unwrap();
+    let cat = guard.as_mut().ok_or("no hay catálogo abierto")?;
+
+    // Nombres existentes → id.
+    let existing: std::collections::HashMap<String, i64> = {
+        let mut stmt = cat.conn.prepare("SELECT name, id FROM disks").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut to_import: Vec<dcmf::DcmfDisk> = Vec::new();
+    for d in disks {
+        match existing.get(&d.name) {
+            Some(&id) if replace => {
+                let _ = db::delete_disk(&mut cat.conn, id);
+                to_import.push(d);
+            }
+            Some(_) => { /* mantener el actual, saltar */ }
+            None => to_import.push(d),
+        }
+    }
+
+    let disk_count = to_import.len();
+    let entries = if to_import.is_empty() {
+        0
+    } else {
+        db::ingest_disks(&mut cat.conn, &to_import).map_err(|e| format!("error en ingesta: {e}"))?
+    };
+
+    Ok(ImportSummary {
+        catalog_path: cat.path.to_string_lossy().to_string(),
+        disks: disk_count,
+        entries,
+        elapsed_ms: now_ms().saturating_sub(t0),
+    })
+}
+
 /// Abre un catálogo `.dccat` existente.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_catalog(state: tauri::State<'_, AppState>, catalog_path: String) -> Result<(), String> {
     let cat_path = PathBuf::from(&catalog_path);
     let conn = db::open(&cat_path).map_err(|e| format!("error abriendo catálogo: {e}"))?;
@@ -245,7 +399,7 @@ pub fn open_catalog(state: tauri::State<'_, AppState>, catalog_path: String) -> 
 }
 
 /// M2: hijos directos de un nodo (raíz del disco si `parent_id` es None).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_children(
     state: tauri::State<'_, AppState>,
     disk_id: i64,
@@ -257,7 +411,7 @@ pub fn list_children(
 }
 
 /// M2: ruta completa de una entrada.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_path(state: tauri::State<'_, AppState>, entry_id: i64) -> Result<String, String> {
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
@@ -265,7 +419,7 @@ pub fn entry_path(state: tauri::State<'_, AppState>, entry_id: i64) -> Result<St
 }
 
 /// M2: una entrada por id (para el inspector).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_entry(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -276,7 +430,7 @@ pub fn get_entry(
 }
 
 /// M7: edita el comentario de una entrada.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_entry_comment(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -288,7 +442,7 @@ pub fn set_entry_comment(
 }
 
 /// M7: edita ubicación / categoría / comentario de un disco.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_disk_meta(
     state: tauri::State<'_, AppState>,
     disk_id: i64,
@@ -309,7 +463,7 @@ pub fn set_disk_meta(
 }
 
 /// M8: estadísticas del catálogo (o de un disco si se pasa `disk_id`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn catalog_stats(
     state: tauri::State<'_, AppState>,
     disk_id: Option<i64>,
@@ -320,7 +474,7 @@ pub fn catalog_stats(
 }
 
 /// M8: archivos duplicados (por nombre+tamaño), ordenados por espacio desperdiciado.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn find_duplicates(
     state: tauri::State<'_, AppState>,
     min_size: Option<i64>,
@@ -333,13 +487,43 @@ pub fn find_duplicates(
 }
 
 /// M7: escribe un archivo de texto (export CSV/TSV/JSON/HTML generado por la UI).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_text_file(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| format!("no se pudo escribir {path}: {e}"))
 }
 
+/// Ruta del archivo de sesión (último catálogo abierto), en el dir de config de
+/// la app. Persistente y durable (no depende del localStorage del webview).
+fn session_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("no se pudo resolver el dir de config: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("no se pudo crear {}: {e}", dir.display()))?;
+    Ok(dir.join("session.json"))
+}
+
+/// Guarda la sesión (JSON con catálogos abiertos + activo) en disco. Durable
+/// frente a cierres forzados; se llama en cada cambio de catálogo.
+#[tauri::command(async)]
+pub fn save_session(app: tauri::AppHandle, contents: String) -> Result<(), String> {
+    let path = session_path(&app)?;
+    std::fs::write(&path, contents).map_err(|e| format!("no se pudo guardar la sesión: {e}"))
+}
+
+/// Lee la sesión guardada (o None si no existe). Nunca borra nada.
+#[tauri::command(async)]
+pub fn load_session(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let path = session_path(&app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("no se pudo leer la sesión: {e}")),
+    }
+}
+
 /// M4: búsqueda por atributos / booleana (ext, tamaño, fecha, tipo, disco).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_advanced(
     state: tauri::State<'_, AppState>,
     filters: db::SearchFilters,
@@ -383,7 +567,7 @@ fn resolve_real_path(conn: &Connection, entry_id: i64) -> Result<PathBuf, String
 }
 
 /// M6: resuelve la ruta real en el filesystem de una entrada, si su disco está montado.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_fs_path(state: tauri::State<'_, AppState>, entry_id: i64) -> Result<String, String> {
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
@@ -397,6 +581,12 @@ const RAW_EXTS: &[&str] = &[
     "dng", "arw", "cr2", "cr3", "crw", "nef", "nrw", "raf", "orf", "rw2", "pef", "srw", "3fr",
     "iiq", "dcr", "mrw", "mos", "erf", "rwl",
 ];
+/// Extensiones de video para preview on-demand (extrae un frame con ffmpeg).
+const VIDEO_THUMB_EXTS: &[&str] = &[
+    "mp4", "mov", "m4v", "avi", "mkv", "mxf", "mts", "m2ts", "wmv", "webm", "mpg", "mpeg", "3gp",
+    "flv", "ogv", "vob", "m2v",
+];
+
 /// Lado máximo del thumbnail cacheado. Compacto pero nítido en el inspector/grilla.
 const THUMB_CACHE_MAX: u32 = 320;
 
@@ -487,6 +677,24 @@ pub fn get_thumbnail(
         resolve_real_path(&cat.conn, entry_id)?
     };
     let max = max.unwrap_or(THUMB_CACHE_MAX).clamp(32, 1024);
+
+    // Video: extraer un frame con ffmpeg en el momento (rápido, seek por keyframe).
+    // Probar ~1s y, si el clip es muy corto, caer a 0s. Se cachea el frame.
+    let is_video = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| VIDEO_THUMB_EXTS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false);
+    if is_video {
+        let bytes = video::extract_frame(&path, 1.0, max)
+            .or_else(|_| video::extract_frame(&path, 0.0, max))?;
+        let guard = state.catalog.lock().unwrap();
+        if let Some(cat) = guard.as_ref() {
+            let _ = db::store_thumbnail(&cat.conn, entry_id, &bytes, max, 0);
+        }
+        return Ok(img_data_url(&bytes));
+    }
+
     let (bytes, w, h) = render_image_thumb(&path, max)?;
     {
         let guard = state.catalog.lock().unwrap();
@@ -575,7 +783,7 @@ fn img_data_url(bytes: &[u8]) -> String {
 }
 
 /// ¿Están disponibles ffprobe/ffmpeg? La UI lo usa para mostrar/ocultar features.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn media_tools_available() -> bool {
     video::tools_available()
 }
@@ -664,7 +872,7 @@ pub fn index_disk_videos(
 }
 
 /// Metadata técnica de un video (si fue indexada).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_video_meta(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -675,7 +883,7 @@ pub fn get_video_meta(
 }
 
 /// Tira de frames cacheada de un video, como data URLs PNG.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_video_frames(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -755,7 +963,7 @@ pub fn index_disk_archives(
 }
 
 /// Lista el contenido indexado de un archivo comprimido.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_archive_contents(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -768,7 +976,7 @@ pub fn list_archive_contents(
 // ---------- Tags / keywords (Fase A) ----------
 
 /// Agrega un tag a una entrada y devuelve la lista actualizada.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_entry_tag(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -781,7 +989,7 @@ pub fn add_entry_tag(
 }
 
 /// Quita un tag de una entrada y devuelve la lista actualizada.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_entry_tag(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -794,7 +1002,7 @@ pub fn remove_entry_tag(
 }
 
 /// Tags de una entrada.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_entry_tags(
     state: tauri::State<'_, AppState>,
     entry_id: i64,
@@ -805,7 +1013,7 @@ pub fn get_entry_tags(
 }
 
 /// Todos los tags del catálogo con su conteo de uso.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_tags(state: tauri::State<'_, AppState>) -> Result<Vec<db::TagStat>, String> {
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
@@ -813,7 +1021,8 @@ pub fn list_tags(state: tauri::State<'_, AppState>) -> Result<Vec<db::TagStat>, 
 }
 
 /// Limpieza: mueve el ORIGINAL a la papelera del sistema (requiere disco montado)
-/// y elimina la entrada del catálogo. Devuelve la ruta movida.
+/// y elimina la entrada (y su subárbol, si es carpeta) del catálogo. Devuelve la
+/// ruta movida.
 #[tauri::command(async)]
 pub fn move_to_trash(state: tauri::State<'_, AppState>, entry_id: i64) -> Result<String, String> {
     let path = {
@@ -824,13 +1033,113 @@ pub fn move_to_trash(state: tauri::State<'_, AppState>, entry_id: i64) -> Result
     trash::delete(&path).map_err(|e| format!("no se pudo mover a la papelera: {e}"))?;
     let mut guard = state.catalog.lock().unwrap();
     if let Some(cat) = guard.as_mut() {
-        let _ = db::delete_entry(&mut cat.conn, entry_id);
+        let _ = db::delete_subtree(&mut cat.conn, entry_id);
     }
     Ok(path.to_string_lossy().to_string())
 }
 
+#[derive(Serialize)]
+pub struct TrashFailure {
+    pub id: i64,
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct TrashSummary {
+    /// Cantidad de ítems efectivamente enviados a la papelera (o ya cubiertos por
+    /// una carpeta padre borrada en el mismo lote).
+    pub moved: i64,
+    pub failed: Vec<TrashFailure>,
+}
+
+/// Limpieza en lote: mueve varios originales a la papelera y limpia el catálogo.
+/// Procesa de menos a más profundo y saltea descendientes de carpetas ya borradas
+/// en el mismo lote (evita errores de "ya no existe"). Tolerante a fallos parciales.
+#[tauri::command(async)]
+pub fn move_entries_to_trash(
+    state: tauri::State<'_, AppState>,
+    entry_ids: Vec<i64>,
+) -> Result<TrashSummary, String> {
+    // 1) Resolver nombres y rutas reales con un único lock de lectura.
+    let mut resolved: Vec<(i64, String, Result<PathBuf, String>)> = Vec::new();
+    {
+        let guard = state.catalog.lock().unwrap();
+        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+        for id in entry_ids {
+            let name = db::get_entry(&cat.conn, id)
+                .ok()
+                .flatten()
+                .map(|e| e.name)
+                .unwrap_or_else(|| format!("#{id}"));
+            let path = resolve_real_path(&cat.conn, id);
+            resolved.push((id, name, path));
+        }
+    }
+
+    // 2) Más superficial primero, para que las carpetas se borren antes que sus hijos.
+    resolved.sort_by_key(|(_, _, p)| p.as_ref().map(|p| p.components().count()).unwrap_or(usize::MAX));
+
+    let mut moved = 0i64;
+    let mut failed = Vec::new();
+    let mut trashed_dirs: Vec<PathBuf> = Vec::new();
+    let mut ok_ids: Vec<i64> = Vec::new();
+
+    for (id, name, path) in resolved {
+        let path = match path {
+            Ok(p) => p,
+            Err(e) => {
+                failed.push(TrashFailure { id, name, error: e });
+                continue;
+            }
+        };
+        // ¿Descendiente de una carpeta ya enviada a la papelera? Ya se fue con el padre.
+        if trashed_dirs.iter().any(|d| path.starts_with(d)) {
+            ok_ids.push(id);
+            moved += 1;
+            continue;
+        }
+        let is_dir = path.is_dir();
+        match trash::delete(&path) {
+            Ok(()) => {
+                if is_dir {
+                    trashed_dirs.push(path.clone());
+                }
+                ok_ids.push(id);
+                moved += 1;
+            }
+            Err(e) => failed.push(TrashFailure {
+                id,
+                name,
+                error: format!("no se pudo mover a la papelera: {e}"),
+            }),
+        }
+    }
+
+    // 3) Limpiar el catálogo (subárbol por cada id exitoso) con un lock de escritura.
+    {
+        let mut guard = state.catalog.lock().unwrap();
+        if let Some(cat) = guard.as_mut() {
+            for id in ok_ids {
+                let _ = db::delete_subtree(&mut cat.conn, id);
+            }
+        }
+    }
+
+    Ok(TrashSummary { moved, failed })
+}
+
+/// Quita un disco entero del catálogo (no toca el original en disco). Para
+/// discos que ya no existen o que se quieren sacar del listado.
+#[tauri::command(async)]
+pub fn delete_disk(state: tauri::State<'_, AppState>, disk_id: i64) -> Result<(), String> {
+    let mut guard = state.catalog.lock().unwrap();
+    let cat = guard.as_mut().ok_or("no hay catálogo abierto")?;
+    db::delete_disk(&mut cat.conn, disk_id).map_err(|e| e.to_string())
+}
+
 /// M3: búsqueda full-text por nombre sobre todo el catálogo.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_entries(
     state: tauri::State<'_, AppState>,
     query: String,
@@ -851,10 +1160,13 @@ pub struct ScanSummary {
     pub replaced: bool,
     pub volume_uuid: Option<String>,
     pub elapsed_ms: u128,
+    /// Carpetas reutilizadas sin descender el FS (re-escaneo incremental). 0 en
+    /// un escaneo completo (disco nuevo o `force_full`).
+    pub reused_dirs: u64,
 }
 
 /// M5: lista los volúmenes montados (para elegir cuál escanear / detectar nuevos).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_volumes() -> Vec<VolumeInfo> {
     scan::list_volumes()
 }
@@ -863,13 +1175,27 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
 /// Re-escanea (reemplaza) si ya existe un disco con el mismo fingerprint.
 /// Requiere un catálogo abierto.
 #[tauri::command(async)]
-pub fn scan_disk(
+pub async fn scan_disk(
     app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
     mount_path: String,
     name: Option<String>,
     options: Option<ScanOptions>,
 ) -> Result<ScanSummary, String> {
+    // El recorrido es 100% bloqueante (FS). Lo corremos en el pool de bloqueo
+    // para que varios discos se escaneen EN PARALELO sin trabar el runtime ni la
+    // UI (antes, como comando async con cuerpo bloqueante, podían serializarse).
+    tauri::async_runtime::spawn_blocking(move || scan_disk_blocking(app, mount_path, name, options))
+        .await
+        .map_err(|e| format!("error en la tarea de escaneo: {e}"))?
+}
+
+fn scan_disk_blocking(
+    app: tauri::AppHandle,
+    mount_path: String,
+    name: Option<String>,
+    options: Option<ScanOptions>,
+) -> Result<ScanSummary, String> {
+    let state = app.state::<AppState>();
     let t0 = now_ms();
     let root = PathBuf::from(&mount_path);
     if !root.exists() {
@@ -880,7 +1206,11 @@ pub fn scan_disk(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| mount_path.clone())
     });
-    let opts = options.unwrap_or_default();
+    let mut opts = options.unwrap_or_default();
+    // "Excluir basura" (opt-in): suma la lista de basura conocida a las exclusiones.
+    if opts.exclude_junk {
+        opts.exclude_names.extend(scan::default_excludes());
+    }
 
     // Fingerprint + capacidad/tipo desde el volumen (si coincide con un mount conocido).
     let fingerprint = scan::volume_fingerprint(&root);
@@ -893,29 +1223,79 @@ pub fn scan_disk(
         .map(|v| v.total_space.saturating_sub(v.available_space))
         .unwrap_or(0);
 
-    let disk = {
+    // Ruta del catálogo abierto (la necesitamos antes para cargar el árbol viejo).
+    let cat_path = {
+        let guard = state.catalog.lock().unwrap();
+        guard
+            .as_ref()
+            .ok_or("no hay catálogo abierto: creá o abrí uno antes de escanear")?
+            .path
+            .clone()
+    };
+
+    // Re-escaneo incremental: cargar el árbol catalogado (por fingerprint, o por
+    // nombre si el disco no expone Volume UUID) para reutilizar subárboles cuyo
+    // mtime no cambió. `force_full` lo desactiva (escaneo completo).
+    let old_tree = if opts.force_full {
+        None
+    } else {
+        db::open(&cat_path)
+            .ok()
+            .and_then(|c| db::load_disk_tree(&c, fingerprint.as_deref(), &volume_name).ok().flatten())
+    };
+
+    // Empezar "limpio": descartar cualquier cancelación vieja de este mount.
+    clear_cancel(&mount_path);
+    let (disk, reused_dirs) = {
         let app = app.clone();
         let mp = mount_path.clone();
-        scan::scan_volume_cb(&root, &volume_name, &opts, &mut |count, bytes| {
+        let cancel_mp = mount_path.clone();
+        let mut on_progress = |count: u64, bytes: u64| {
             let pct = if used_bytes > 0 {
                 ((bytes.min(used_bytes)) * 100 / used_bytes).min(99) as i32
             } else {
                 -1
             };
             let _ = app.emit("scan-progress", ScanProgress { mount: mp.clone(), count, pct });
-        })
-        .map_err(|e| format!("error escaneando: {e}"))?
+        };
+        let cancel = || cancel_requested(&cancel_mp);
+        let res = match &old_tree {
+            Some(old) => scan::scan_volume_incremental(
+                &root, &volume_name, &opts, &mut on_progress, &cancel, old,
+            ),
+            None => scan::scan_volume_cb(&root, &volume_name, &opts, &mut on_progress, &cancel)
+                .map(|d| (d, 0)),
+        };
+        match res {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                clear_cancel(&mount_path);
+                // Avisar a la UI que el escaneo terminó (sin barra colgada).
+                let _ = app.emit(
+                    "scan-progress",
+                    ScanProgress { mount: mount_path.clone(), count: 0, pct: 100 },
+                );
+                return Err("escaneo cancelado".into());
+            }
+            Err(e) => return Err(format!("error escaneando: {e}")),
+        }
     };
-    // Señal de fin de fase de escaneo.
+    clear_cancel(&mount_path);
+    // Fin del recorrido → fase de GUARDADO (pct = -2). Ingestar millones de filas
+    // tarda y no emite progreso; este sentinel hace que la UI muestre "Guardando…"
+    // en vez de un "Scanning" congelado que parece colgado.
     let _ = app.emit(
         "scan-progress",
-        ScanProgress { mount: mount_path.clone(), count: disk.entries.len() as u64, pct: 100 },
+        ScanProgress { mount: mount_path.clone(), count: disk.entries.len() as u64, pct: -2 },
     );
 
-    let mut guard = state.catalog.lock().unwrap();
-    let cat = guard.as_mut().ok_or("no hay catálogo abierto: creá o abrí uno antes de escanear")?;
+    // Ingesta en una conexión PROPIA (WAL): así insertar millones de filas NO
+    // bloquea las lecturas de la UI (clickear discos/carpetas) ni a otros
+    // escaneos. La conexión compartida queda libre; otro escritor espera por
+    // busy_timeout en vez de fallar.
+    let mut conn = db::open(&cat_path).map_err(|e| format!("error abriendo catálogo: {e}"))?;
     let ingest = db::ingest_scanned(
-        &mut cat.conn,
+        &mut conn,
         &disk,
         fingerprint.as_deref(),
         &kind,
@@ -933,6 +1313,7 @@ pub fn scan_disk(
         replaced: ingest.replaced,
         volume_uuid: fingerprint,
         elapsed_ms: now_ms().saturating_sub(t0),
+        reused_dirs,
     })
 }
 
@@ -948,7 +1329,7 @@ fn volume_caps(mount_path: &str) -> (Option<i64>, String) {
 
 /// M5: arranca el watcher que detecta discos conectados/desconectados y emite
 /// eventos `volume-added` / `volume-removed` con el `VolumeInfo`. Idempotente.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_volume_watch(app: tauri::AppHandle, state: tauri::State<'_, AppState>) {
     if state.watch_started.swap(true, Ordering::SeqCst) {
         return; // ya está corriendo
@@ -964,6 +1345,12 @@ pub fn start_volume_watch(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             for v in &current {
                 if !known.iter().any(|k| k.mount_path == v.mount_path) {
                     let _ = app.emit("volume-added", v);
+                    // Traer la ventana al frente (aunque esté oculta en el tray)
+                    // para que el popup "disco detectado" sea visible.
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
                 }
             }
             // Quitados: en known pero no en current.
@@ -979,7 +1366,7 @@ pub fn start_volume_watch(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
 /// Marca discos online/offline comparando `volume_uuid`/`mount_path` con los
 /// volúmenes montados ahora (M6, base). Devuelve la lista actualizada.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn refresh_online_status(state: tauri::State<'_, AppState>) -> Result<Vec<DiskRow>, String> {
     let vols = scan::list_volumes();
     let guard = state.catalog.lock().unwrap();
@@ -1007,7 +1394,7 @@ pub fn refresh_online_status(state: tauri::State<'_, AppState>) -> Result<Vec<Di
 }
 
 /// Lista los discos del catálogo abierto.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_disks(state: tauri::State<'_, AppState>) -> Result<Vec<DiskRow>, String> {
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
@@ -1034,4 +1421,80 @@ pub fn list_disks(state: tauri::State<'_, AppState>) -> Result<Vec<DiskRow>, Str
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Detalle de un disco para el panel de info. Si el disco está montado ahora,
+/// agrega el espacio total/libre en vivo del volumen (más preciso que lo cataloga).
+#[tauri::command(async)]
+pub fn disk_detail(state: tauri::State<'_, AppState>, disk_id: i64) -> Result<DiskDetail, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    let (
+        id,
+        name,
+        total_size,
+        file_count,
+        folder_count,
+        is_online,
+        kind,
+        capacity,
+        scanned_at,
+        volume_uuid,
+        mount_path,
+    ) = cat
+        .conn
+        .query_row(
+            "SELECT id, name, total_size, file_count, folder_count, is_online, kind, capacity, scanned_at, volume_uuid, mount_path \
+             FROM disks WHERE id = ?1",
+            rusqlite::params![disk_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)? != 0,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, Option<i64>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Espacio en vivo si el disco está montado: priorizar fingerprint, luego
+    // mount_path, luego nombre del volumen.
+    let (mut live_total, mut live_free) = (None, None);
+    if is_online {
+        let vols = scan::list_volumes();
+        let matched = vols
+            .iter()
+            .find(|v| v.fingerprint.is_some() && v.fingerprint == volume_uuid)
+            .or_else(|| {
+                vols.iter()
+                    .find(|v| mount_path.as_deref() == Some(v.mount_path.as_str()))
+            })
+            .or_else(|| vols.iter().find(|v| v.name == name));
+        if let Some(v) = matched {
+            live_total = Some(v.total_space as i64);
+            live_free = Some(v.available_space as i64);
+        }
+    }
+
+    Ok(DiskDetail {
+        id,
+        name,
+        total_size,
+        file_count,
+        folder_count,
+        is_online,
+        kind,
+        capacity,
+        scanned_at,
+        live_total,
+        live_free,
+    })
 }

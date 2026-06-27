@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
 import { useCatalog } from "../store/catalog";
+import { useT } from "../lib/i18n";
 
 /** Buscador global (M3) con debounce y atajo ⌘/Ctrl+F. */
 export function SearchBar() {
+  const t = useT();
   const [value, setValue] = useState("");
   const runSearch = useCatalog((s) => s.runSearch);
   const clearSearch = useCatalog((s) => s.clearSearch);
@@ -37,11 +39,12 @@ export function SearchBar() {
     <div className="relative w-full max-w-md">
       <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-neutral-500" />
       <input
+        id="diskdex-search"
         ref={inputRef}
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder="Buscar…  ej: render tag:boda ext:mov size>1gb after:2023-01-01  (⌘F)"
-        title="Tokens: tag:boda,4k · ext:mov,mp4 · size>1gb · size<500mb · after:2023-01-01 · before:2024-06-01 · type:file|folder"
+        placeholder={t("search.placeholder")}
+        title={t("search.tokensHint")}
         className="w-full rounded-md border border-neutral-700 bg-neutral-900 py-1.5 pl-8 pr-8 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none"
       />
       {value && (

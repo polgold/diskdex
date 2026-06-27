@@ -27,6 +27,19 @@ export function formatCount(n: number): string {
   return n.toLocaleString();
 }
 
+/** Antigüedad legible y localizada de un timestamp ("hoy"/"today", "hace 5
+ *  días"/"5 days ago", …) según el idioma actual, vía Intl.RelativeTimeFormat. */
+export function formatAge(unixSeconds: number | null | undefined, lang = "es"): string {
+  if (!unixSeconds) return "—";
+  const days = Math.floor((Date.now() / 1000 - unixSeconds) / 86400);
+  const rtf = new Intl.RelativeTimeFormat(lang, { numeric: "auto" });
+  if (days <= 0) return rtf.format(0, "day"); // hoy / today
+  if (days < 30) return rtf.format(-days, "day");
+  const months = Math.floor(days / 30);
+  if (months < 12) return rtf.format(-months, "month");
+  return rtf.format(-Math.floor(days / 365), "year");
+}
+
 /** Duración en ms → "1:02:03" o "2:05". */
 export function formatDuration(ms: number | null | undefined): string {
   if (!ms || ms <= 0) return "—";

@@ -14,6 +14,15 @@ export interface Crumb {
 }
 
 type Mode = "browse" | "search";
+export type ViewMode = "table" | "grid";
+
+function initialViewMode(): ViewMode {
+  try {
+    return localStorage.getItem("diskdex:viewmode") === "grid" ? "grid" : "table";
+  } catch {
+    return "table";
+  }
+}
 
 export interface OpenCatalog {
   path: string;
@@ -33,8 +42,13 @@ interface CatalogState {
   selectedDiskId: number | null;
   breadcrumb: Crumb[];
   contentEntries: EntryRow[];
-  selectedEntryId: number | null;
+  selectedEntryId: number | null; // primario (último clickeado) → alimenta el inspector
+  selectedIds: number[]; // multi-selección (incluye al primario)
   contentLoading: boolean;
+
+  // Vista (tabla / galería)
+  viewMode: ViewMode;
+  setViewMode: (m: ViewMode) => void;
 
   // Búsqueda (M3/M4)
   searchQuery: string;
@@ -53,6 +67,7 @@ interface CatalogState {
   gotoFolder: (diskId: number, parentId: number | null, breadcrumb: Crumb[]) => Promise<void>;
   navigateToCrumb: (index: number) => Promise<void>;
   selectEntry: (id: number | null) => void;
+  setSelection: (ids: number[], primary: number | null) => void;
 
   runSearch: (query: string) => Promise<void>;
   clearSearch: () => void;
@@ -67,12 +82,20 @@ function baseName(path: string): string {
   return path.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? path;
 }
 
+// Tokens de secuencia: cada navegación/búsqueda toma uno; al resolver, solo
+// aplica su resultado si sigue siendo el último pedido. Evita que una respuesta
+// lenta y vieja pise el contenido nuevo (cambiar de disco no refrescaba) o deje
+// el "cargando…"/"buscando…" colgado para siempre.
+let navToken = 0;
+let searchToken = 0;
+
 const RESET_NAV = {
   mode: "browse" as Mode,
   selectedDiskId: null,
   breadcrumb: [],
   contentEntries: [],
   selectedEntryId: null,
+  selectedIds: [],
   searchQuery: "",
   searchResult: null,
   parsedFilters: null,
@@ -91,7 +114,18 @@ export const useCatalog = create<CatalogState>((set, get) => ({
   breadcrumb: [],
   contentEntries: [],
   selectedEntryId: null,
+  selectedIds: [],
   contentLoading: false,
+
+  viewMode: initialViewMode(),
+  setViewMode: (viewMode) => {
+    try {
+      localStorage.setItem("diskdex:viewmode", viewMode);
+    } catch {
+      /* ignore */
+    }
+    set({ viewMode });
+  },
 
   searchQuery: "",
   searchResult: null,
@@ -123,73 +157,87 @@ export const useCatalog = create<CatalogState>((set, get) => ({
   setLoading: (loading) => set({ loading }),
 
   openDisk: async (disk) => {
+    const token = ++navToken;
     set({
       mode: "browse",
       selectedDiskId: disk.id,
       breadcrumb: [{ id: null, name: disk.name }],
       selectedEntryId: null,
+      selectedIds: [],
+      contentEntries: [],
       contentLoading: true,
     });
     try {
       const entries = await api.listChildren(disk.id, null);
-      set({ contentEntries: entries, contentLoading: false });
+      if (token === navToken) set({ contentEntries: entries, contentLoading: false });
     } catch (e) {
-      set({ error: String(e), contentLoading: false });
+      if (token === navToken) set({ error: String(e), contentLoading: false });
     }
   },
 
   openFolder: async (entry) => {
+    const token = ++navToken;
     const diskId = get().selectedDiskId ?? entry.disk_id;
     set((s) => ({
       mode: "browse",
       selectedDiskId: diskId,
       breadcrumb: [...s.breadcrumb, { id: entry.id, name: entry.name }],
       selectedEntryId: null,
+      selectedIds: [],
+      contentEntries: [],
       contentLoading: true,
     }));
     try {
       const entries = await api.listChildren(diskId, entry.id);
-      set({ contentEntries: entries, contentLoading: false });
+      if (token === navToken) set({ contentEntries: entries, contentLoading: false });
     } catch (e) {
-      set({ error: String(e), contentLoading: false });
+      if (token === navToken) set({ error: String(e), contentLoading: false });
     }
   },
 
   gotoFolder: async (diskId, parentId, breadcrumb) => {
+    const token = ++navToken;
     set({
       mode: "browse",
       selectedDiskId: diskId,
       breadcrumb,
       selectedEntryId: null,
+      selectedIds: [],
+      contentEntries: [],
       contentLoading: true,
     });
     try {
       const entries = await api.listChildren(diskId, parentId);
-      set({ contentEntries: entries, contentLoading: false });
+      if (token === navToken) set({ contentEntries: entries, contentLoading: false });
     } catch (e) {
-      set({ error: String(e), contentLoading: false });
+      if (token === navToken) set({ error: String(e), contentLoading: false });
     }
   },
 
   navigateToCrumb: async (index) => {
     const { breadcrumb, selectedDiskId } = get();
     if (selectedDiskId == null) return;
+    const token = ++navToken;
     const target = breadcrumb[index];
     set({
       breadcrumb: breadcrumb.slice(0, index + 1),
       selectedEntryId: null,
+      selectedIds: [],
+      contentEntries: [],
       contentLoading: true,
       mode: "browse",
     });
     try {
       const entries = await api.listChildren(selectedDiskId, target.id);
-      set({ contentEntries: entries, contentLoading: false });
+      if (token === navToken) set({ contentEntries: entries, contentLoading: false });
     } catch (e) {
-      set({ error: String(e), contentLoading: false });
+      if (token === navToken) set({ error: String(e), contentLoading: false });
     }
   },
 
-  selectEntry: (id) => set({ selectedEntryId: id }),
+  selectEntry: (id) => set({ selectedEntryId: id, selectedIds: id == null ? [] : [id] }),
+
+  setSelection: (ids, primary) => set({ selectedIds: ids, selectedEntryId: primary }),
 
   runSearch: async (query) => {
     set({ searchQuery: query });
@@ -198,15 +246,14 @@ export const useCatalog = create<CatalogState>((set, get) => ({
       set({ mode: "browse", searchResult: null, searching: false, parsedFilters: null });
       return;
     }
-    set({ mode: "search", searching: true, selectedEntryId: null, parsedFilters: filters });
+    const token = ++searchToken;
+    set({ mode: "search", searching: true, searchResult: null, selectedEntryId: null, selectedIds: [], parsedFilters: filters });
     try {
       const result = await api.searchAdvanced(filters, 2000);
-      // Evitar pisar un resultado más nuevo si el usuario siguió tipeando.
-      if (get().searchQuery === query) {
-        set({ searchResult: result, searching: false });
-      }
+      // Solo el último pedido aplica su resultado (y siempre apaga "buscando…").
+      if (token === searchToken) set({ searchResult: result, searching: false });
     } catch (e) {
-      set({ error: String(e), searching: false });
+      if (token === searchToken) set({ error: String(e), searching: false });
     }
   },
 
@@ -220,12 +267,13 @@ export const useCatalog = create<CatalogState>((set, get) => ({
     if (s.mode === "search") {
       await get().runSearch(s.searchQuery);
     } else if (s.selectedDiskId != null) {
+      const token = ++navToken;
       const parent = s.breadcrumb[s.breadcrumb.length - 1]?.id ?? null;
       try {
         const entries = await api.listChildren(s.selectedDiskId, parent);
-        set({ contentEntries: entries, selectedEntryId: null });
+        if (token === navToken) set({ contentEntries: entries, selectedEntryId: null, selectedIds: [] });
       } catch (e) {
-        set({ error: String(e) });
+        if (token === navToken) set({ error: String(e) });
       }
     }
   },

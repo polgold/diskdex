@@ -7,17 +7,47 @@ edition = "2021"
 # Hay varios binarios auxiliares (agent_probe/scan_probe/validate_dcmf); este es
 # el que `cargo run` / `tauri dev` deben lanzar por defecto.
 default-run = "diskdex"
+# Declaramos los binarios a mano (abajo) para gatear los auxiliares detrás de la
+# feature `tools`: así `cargo build --release` (y por ende `tauri build`) solo
+# compila `diskdex` y los probes NO terminan dentro del .app/instalador.
+autobins = false
+
+[features]
+# Herramientas de diagnóstico/CLI (no se incluyen en el instalador).
+# Uso: cargo run --release --features tools --bin validate_dcmf -- ...
+tools = []
 
 [lib]
 # El sufijo `_lib` evita conflicto de nombre con el binario en Windows.
 name = "diskdex_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Binario principal de la app (el que empaqueta Tauri).
+[[bin]]
+name = "diskdex"
+path = "src/main.rs"
+
+# Auxiliares de diagnóstico: solo se compilan con --features tools.
+[[bin]]
+name = "validate_dcmf"
+path = "src/bin/validate_dcmf.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "agent_probe"
+path = "src/bin/agent_probe.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "scan_probe"
+path = "src/bin/scan_probe.rs"
+required-features = ["tools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
@@ -60,6 +90,11 @@ trash = "5"
 # Utilidades.
 anyhow = "1"
 thiserror = "2"
+
+# statfs (tipo de FS + tamaños) para detectar volúmenes de red montados que
+# sysinfo no enumera (SMB/AFP/NFS) en /Volumes.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Fingerprint y tamaño físico en Windows (GetCompressedFileSizeW / GetVolumeInformationW).
 [target.'cfg(windows)'.dependencies]

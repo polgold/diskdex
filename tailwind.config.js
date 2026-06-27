@@ -78,10 +78,20 @@ export default {
           from: { opacity: "0", transform: "scale(0.97)" },
           to: { opacity: "1", transform: "scale(1)" },
         },
+        "splash-logo": {
+          from: { opacity: "0", transform: "scale(0.9) translateY(8px)" },
+          to: { opacity: "1", transform: "scale(1) translateY(0)" },
+        },
+        "splash-up": {
+          from: { opacity: "0", transform: "translateY(8px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
       },
       animation: {
         "fade-in": "fade-in 150ms ease-out",
         "zoom-in": "zoom-in 160ms cubic-bezier(0.16,1,0.3,1)",
+        "splash-logo": "splash-logo 650ms cubic-bezier(0.16,1,0.3,1) both",
+        "splash-up": "splash-up 600ms cubic-bezier(0.16,1,0.3,1) both",
       },
     },
   },

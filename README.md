@@ -46,7 +46,7 @@ cargo build --release       # build optimizado
 
 ```bash
 cd src-tauri
-cargo run --release --bin validate_dcmf -- "/ruta/al/Catalog.dcmf"
+cargo run --release --features tools --bin validate_dcmf -- "/ruta/al/Catalog.dcmf"
 ```
 
 Imprime: cantidad de discos, total de entradas (archivos/carpetas), tiempo de parseo,

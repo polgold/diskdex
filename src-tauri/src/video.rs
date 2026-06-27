@@ -29,14 +29,31 @@ fn ffprobe_ok() -> bool {
     which("ffprobe").is_some()
 }
 
-/// Resuelve un binario en el PATH (o devuelve el nombre tal cual si existe en
-/// ubicaciones comunes). Mantiene la lógica simple y multiplataforma.
+/// Resuelve `ffmpeg`/`ffprobe`. Prioridad:
+///   1) sidecar empaquetado junto al ejecutable (app instalada, autocontenida),
+///   2) el PATH del sistema,
+///   3) rutas habituales (Homebrew / Linux).
+/// Así el `.app` distribuido no depende de un ffmpeg instalado, pero en `dev`
+/// (donde no hay sidecar al lado del binario de cargo) sigue usando el del sistema.
 fn which(bin: &str) -> Option<String> {
-    // Probar directamente: si `--version` corre, está en PATH.
+    // 1) Sidecar junto al ejecutable. Tauri copia los `externalBin` al mismo
+    //    directorio que el binario principal, sin el sufijo de target-triple
+    //    (en Windows con `.exe`).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in [bin.to_string(), format!("{bin}.exe")] {
+                let cand = dir.join(&name);
+                if cand.exists() {
+                    return Some(cand.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    // 2) En el PATH: si `-version` corre, está disponible.
     if Command::new(bin).arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
         return Some(bin.to_string());
     }
-    // Rutas habituales (Homebrew / Linux).
+    // 3) Rutas habituales (Homebrew Intel/ARM, Linux).
     for base in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"] {
         let p = format!("{base}/{bin}");
         if Path::new(&p).exists() {

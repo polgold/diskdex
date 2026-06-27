@@ -4,9 +4,11 @@ import { api, type EntryRow, type VideoMeta, type ArchiveEntry } from "../lib/ip
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatDate, formatDuration, formatBitrate, formatCount } from "../lib/format";
 import { revealOriginal, openOriginal, copyText } from "../lib/actions";
+import { useT } from "../lib/i18n";
 
 /** Inspector del ítem seleccionado (M2): detalle + ruta completa. */
 export function Inspector() {
+  const t = useT();
   const selectedEntryId = useCatalog((s) => s.selectedEntryId);
   const [entry, setEntry] = useState<EntryRow | null>(null);
   const [path, setPath] = useState<string>("");
@@ -35,7 +37,7 @@ export function Inspector() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-neutral-600">
         <Info className="h-8 w-8" />
-        <p className="text-xs">Seleccioná un ítem para ver su detalle.</p>
+        <p className="text-xs">{t("inspector.noSelection")}</p>
       </div>
     );
   }
@@ -60,24 +62,24 @@ export function Inspector() {
       <ArchiveContents entry={entry} />
 
       <dl className="mt-4 space-y-2.5 text-xs">
-        <Field label="Tipo" value={entry.is_folder ? "Carpeta" : entry.ext ? `Archivo .${entry.ext}` : "Archivo"} />
+        <Field label={t("inspector.type")} value={entry.is_folder ? t("inspector.folder") : entry.ext ? t("inspector.fileExt", { ext: entry.ext }) : t("inspector.file")} />
         <Field
-          label="Tamaño lógico"
+          label={t("inspector.logicalSize")}
           value={entry.is_folder && entry.size_logical === 0 ? "—" : formatBytes(entry.size_logical)}
           mono
         />
         <Field
-          label="Tamaño físico"
+          label={t("inspector.physicalSize")}
           value={entry.size_physical === 0 ? "—" : formatBytes(entry.size_physical)}
           mono
         />
         {entry.is_folder && (
-          <Field label="Elementos" value={entry.child_count.toLocaleString()} mono />
+          <Field label={t("inspector.items")} value={entry.child_count.toLocaleString()} mono />
         )}
-        <Field label="Creado" value={formatDate(entry.created_at)} mono />
-        <Field label="Modificado" value={formatDate(entry.modified_at)} mono />
+        <Field label={t("inspector.created")} value={formatDate(entry.created_at)} mono />
+        <Field label={t("inspector.modified")} value={formatDate(entry.modified_at)} mono />
         <div>
-          <dt className="text-neutral-500">Ruta completa</dt>
+          <dt className="text-neutral-500">{t("inspector.fullPath")}</dt>
           <dd className="mt-1 break-all rounded bg-neutral-900 p-2 font-mono text-[11px] text-neutral-300">
             {path || "—"}
           </dd>
@@ -93,6 +95,7 @@ export function Inspector() {
 
 /** Editor de keywords/tags del ítem: chips con quitar + alta por Enter/coma. */
 function TagEditor({ entry }: { entry: EntryRow }) {
+  const t = useT();
   const [tags, setTags] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const runSearch = useCatalog((s) => s.runSearch);
@@ -124,27 +127,27 @@ function TagEditor({ entry }: { entry: EntryRow }) {
   return (
     <div className="mt-4">
       <div className="flex items-center gap-1.5 text-xs text-neutral-500">
-        <Tag className="h-3.5 w-3.5" /> Keywords
+        <Tag className="h-3.5 w-3.5" /> {t("inspector.keywords")}
       </div>
       <div className="mt-1.5 flex flex-wrap gap-1.5">
-        {tags.map((t) => (
+        {tags.map((tag) => (
           <span
-            key={t}
+            key={tag}
             className="inline-flex items-center gap-1 rounded-full bg-sky-950/60 px-2 py-0.5 text-[11px] text-sky-200 ring-1 ring-sky-900"
           >
             <button
-              onClick={() => runSearch(`tag:${t}`)}
+              onClick={() => runSearch(`tag:${tag}`)}
               className="hover:underline"
-              title={`Buscar todo lo etiquetado «${t}»`}
+              title={t("inspector.searchTagged", { tag })}
             >
-              {t}
+              {tag}
             </button>
-            <button onClick={() => remove(t)} className="text-sky-400/70 hover:text-sky-200" title="Quitar">
+            <button onClick={() => remove(tag)} className="text-sky-400/70 hover:text-sky-200" title={t("inspector.remove")}>
               <X className="h-3 w-3" />
             </button>
           </span>
         ))}
-        {tags.length === 0 && <span className="text-[11px] text-neutral-600">sin keywords</span>}
+        {tags.length === 0 && <span className="text-[11px] text-neutral-600">{t("inspector.noKeywords")}</span>}
       </div>
       <input
         value={draft}
@@ -156,7 +159,7 @@ function TagEditor({ entry }: { entry: EntryRow }) {
           }
         }}
         onBlur={add}
-        placeholder="Agregar keyword + Enter…"
+        placeholder={t("inspector.addKeyword")}
         className="mt-1.5 w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none"
       />
     </div>
@@ -164,6 +167,7 @@ function TagEditor({ entry }: { entry: EntryRow }) {
 }
 
 function CommentEditor({ entry }: { entry: EntryRow }) {
+  const t = useT();
   const [value, setValue] = useState(entry.comment ?? "");
   const [saved, setSaved] = useState(false);
   // Re-sincronizar al cambiar de ítem.
@@ -180,15 +184,15 @@ function CommentEditor({ entry }: { entry: EntryRow }) {
   return (
     <div className="mt-4">
       <label className="flex items-center justify-between text-xs text-neutral-500">
-        Comentario
-        {saved && <span className="text-emerald-400">guardado</span>}
+        {t("inspector.comment")}
+        {saved && <span className="text-emerald-400">{t("inspector.saved")}</span>}
       </label>
       <textarea
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onBlur={save}
         rows={3}
-        placeholder="Notas sobre este ítem…"
+        placeholder={t("inspector.commentPlaceholder")}
         className="mt-1 w-full resize-none rounded border border-neutral-700 bg-neutral-900 p-2 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none"
       />
     </div>
@@ -213,6 +217,7 @@ const isVideo = (e: EntryRow) => !!extOf(e) && VIDEO_EXTS.has(extOf(e)!);
 const isArchive = (e: EntryRow) => !!extOf(e) && ARCHIVE_EXTS.has(extOf(e)!);
 
 function ThumbnailPreview({ entry }: { entry: EntryRow }) {
+  const t = useT();
   const [src, setSrc] = useState<string | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const previewable = isImage(entry) || isVideo(entry);
@@ -238,10 +243,10 @@ function ThumbnailPreview({ entry }: { entry: EntryRow }) {
 
   return (
     <div className="mt-3 overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950">
-      {state === "loading" && <div className="p-6 text-center text-xs text-neutral-600">generando preview…</div>}
+      {state === "loading" && <div className="p-6 text-center text-xs text-neutral-600">{t("inspector.generatingPreview")}</div>}
       {state === "error" && (
         <div className="p-3 text-center text-[11px] text-neutral-600">
-          preview no disponible (disco offline o formato sin soporte)
+          {t("inspector.previewUnavailable")}
         </div>
       )}
       {src && <img src={src} alt={entry.name} className="mx-auto max-h-56 w-full object-contain" />}
@@ -251,6 +256,7 @@ function ThumbnailPreview({ entry }: { entry: EntryRow }) {
 
 /** Metadata técnica + tira de frames de un clip de video (Fase B). */
 function VideoInfo({ entry }: { entry: EntryRow }) {
+  const t = useT();
   const show = isVideo(entry);
   const [meta, setMeta] = useState<VideoMeta | null>(null);
   const [frames, setFrames] = useState<string[]>([]);
@@ -272,7 +278,7 @@ function VideoInfo({ entry }: { entry: EntryRow }) {
   return (
     <div className="mt-3">
       <div className="flex items-center gap-1.5 text-xs text-neutral-500">
-        <Film className="h-3.5 w-3.5" /> Video
+        <Film className="h-3.5 w-3.5" /> {t("inspector.video")}
       </div>
 
       {frames.length > 0 && (
@@ -290,15 +296,15 @@ function VideoInfo({ entry }: { entry: EntryRow }) {
 
       {meta && (
         <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-          <MetaCell label="Duración" value={formatDuration(meta.duration_ms)} />
+          <MetaCell label={t("inspector.duration")} value={formatDuration(meta.duration_ms)} />
           <MetaCell
-            label="Resolución"
+            label={t("inspector.resolution")}
             value={meta.width && meta.height ? `${meta.width}×${meta.height}` : "—"}
           />
-          <MetaCell label="FPS" value={meta.fps ? meta.fps.toFixed(2) : "—"} />
-          <MetaCell label="Bitrate" value={formatBitrate(meta.bitrate)} />
-          <MetaCell label="Códec video" value={meta.vcodec ?? "—"} />
-          <MetaCell label="Códec audio" value={meta.acodec ?? "—"} />
+          <MetaCell label={t("inspector.fps")} value={meta.fps ? meta.fps.toFixed(2) : "—"} />
+          <MetaCell label={t("inspector.bitrate")} value={formatBitrate(meta.bitrate)} />
+          <MetaCell label={t("inspector.videoCodec")} value={meta.vcodec ?? "—"} />
+          <MetaCell label={t("inspector.audioCodec")} value={meta.acodec ?? "—"} />
         </dl>
       )}
     </div>
@@ -318,6 +324,7 @@ function MetaCell({ label, value }: { label: string; value: string }) {
 
 /** Contenido indexado dentro de un archivo comprimido (Fase B). */
 function ArchiveContents({ entry }: { entry: EntryRow }) {
+  const t = useT();
   const show = isArchive(entry);
   const [items, setItems] = useState<ArchiveEntry[] | null>(null);
 
@@ -344,15 +351,15 @@ function ArchiveContents({ entry }: { entry: EntryRow }) {
     <div className="mt-3">
       <div className="flex items-center justify-between text-xs text-neutral-500">
         <span className="flex items-center gap-1.5">
-          <Package className="h-3.5 w-3.5" /> Contenido del archivo
+          <Package className="h-3.5 w-3.5" /> {t("inspector.archiveContents")}
         </span>
         {items.length > 0 && (
-          <span className="text-[11px] text-neutral-600">{formatCount(files)} archivos</span>
+          <span className="text-[11px] text-neutral-600">{t("inspector.filesCount", { n: formatCount(files) })}</span>
         )}
       </div>
       {items.length === 0 ? (
         <p className="mt-1.5 rounded-md border border-neutral-800 bg-neutral-950 p-3 text-center text-[11px] text-neutral-600">
-          sin indexar (re-escaneá con el disco conectado) o archivo vacío
+          {t("inspector.notIndexed")}
         </p>
       ) : (
         <div className="mt-1.5 max-h-60 overflow-auto rounded-lg border border-neutral-800 bg-neutral-950">
@@ -377,7 +384,7 @@ function ArchiveContents({ entry }: { entry: EntryRow }) {
           ))}
           {items.length > CAP && (
             <div className="px-2 py-1.5 text-center text-[11px] text-neutral-600">
-              … y {formatCount(items.length - CAP)} más
+              {t("inspector.andMore", { n: formatCount(items.length - CAP) })}
             </div>
           )}
         </div>
@@ -387,6 +394,7 @@ function ArchiveContents({ entry }: { entry: EntryRow }) {
 }
 
 function Actions({ entry, catalogPath }: { entry: EntryRow; catalogPath: string }) {
+  const t = useT();
   const setError = useCatalog((s) => s.setError);
   const [busy, setBusy] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -416,27 +424,27 @@ function Actions({ entry, catalogPath }: { entry: EntryRow; catalogPath: string 
         onClick={() => run("reveal")}
         disabled={busy !== null}
         className="inline-flex items-center gap-1.5 rounded-md border border-neutral-700 px-2.5 py-1 text-xs hover:bg-neutral-800 disabled:opacity-50"
-        title="Revelar el original en Finder/Explorer (requiere el disco montado)"
+        title={t("inspector.revealTitle")}
       >
-        <FolderSearch className="h-3.5 w-3.5" /> Revelar
+        <FolderSearch className="h-3.5 w-3.5" /> {t("inspector.reveal")}
       </button>
       {!entry.is_folder && (
         <button
           onClick={() => run("open")}
           disabled={busy !== null}
           className="inline-flex items-center gap-1.5 rounded-md border border-neutral-700 px-2.5 py-1 text-xs hover:bg-neutral-800 disabled:opacity-50"
-          title="Abrir el original con la app por defecto (requiere el disco montado)"
+          title={t("inspector.openTitle")}
         >
-          <ExternalLink className="h-3.5 w-3.5" /> Abrir
+          <ExternalLink className="h-3.5 w-3.5" /> {t("inspector.open")}
         </button>
       )}
       <button
         onClick={copy}
         className="inline-flex items-center gap-1.5 rounded-md border border-neutral-700 px-2.5 py-1 text-xs hover:bg-neutral-800"
-        title="Copiar la ruta del catálogo"
+        title={t("inspector.copyPathTitle")}
       >
         {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-        {copied ? "Copiado" : "Copiar ruta"}
+        {copied ? t("inspector.copied") : t("inspector.copyPath")}
       </button>
     </div>
   );

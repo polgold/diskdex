@@ -2106,6 +2106,96 @@ pub fn compare_subtrees(conn: &Connection, source_root: i64, dest_root: i64) -> 
     })
 }
 
+// ─────────────────────────── Plan de copia multi-disco (D) ───────────────────────────
+//
+// "Reuní todos los atardeceres" → los archivos elegidos viven en varios discos (varios
+// desconectados). Se agrupan por disco para guiar la copia disco por disco. OFFLINE:
+// el plan se arma sobre el catálogo; copiar (gather_copy en commands) requiere montar
+// el disco de cada grupo.
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GatherFile {
+    pub entry_id: i64,
+    pub name: String,
+    pub size: i64,
+    pub path: String, // ruta dentro del catálogo (incluye nombre del disco)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GatherGroup {
+    pub disk_id: i64,
+    pub disk_name: String,
+    pub is_online: bool,
+    pub total: u64,
+    pub total_bytes: i64,
+    pub files: Vec<GatherFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GatherPlan {
+    pub groups: Vec<GatherGroup>,
+    pub total_files: u64,
+    pub total_bytes: i64,
+    pub skipped_folders: u64,
+}
+
+/// Agrupa los archivos elegidos por disco (online primero). Las carpetas se ignoran
+/// en esta versión (se reporta el conteo); el caller puede expandirlas a futuro.
+pub fn gather_plan(conn: &Connection, entry_ids: &[i64]) -> DbResult<GatherPlan> {
+    use std::collections::HashMap;
+    if entry_ids.is_empty() {
+        return Ok(GatherPlan { groups: Vec::new(), total_files: 0, total_bytes: 0, skipped_folders: 0 });
+    }
+    let ph = entry_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT e.id, e.is_folder, e.size_logical, e.name, e.disk_id, d.name, d.is_online \
+         FROM entries e JOIN disks d ON d.id = e.disk_id WHERE e.id IN ({ph})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<(i64, bool, i64, String, i64, String, bool)> = stmt
+        .query_map(params_from_iter(entry_ids.iter()), |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, i64>(1)? != 0,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get::<_, i64>(6)? != 0,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    let mut by_disk: HashMap<i64, GatherGroup> = HashMap::new();
+    let mut order: Vec<i64> = Vec::new();
+    let mut skipped_folders = 0u64;
+    let mut total_files = 0u64;
+    let mut total_bytes = 0i64;
+
+    for (id, is_folder, size, name, disk_id, disk_name, is_online) in rows {
+        if is_folder {
+            skipped_folders += 1;
+            continue;
+        }
+        let path = entry_path(conn, id)?;
+        let g = by_disk.entry(disk_id).or_insert_with(|| {
+            order.push(disk_id);
+            GatherGroup { disk_id, disk_name, is_online, total: 0, total_bytes: 0, files: Vec::new() }
+        });
+        g.total += 1;
+        g.total_bytes += size.max(0);
+        g.files.push(GatherFile { entry_id: id, name, size, path });
+        total_files += 1;
+        total_bytes += size.max(0);
+    }
+
+    let mut groups: Vec<GatherGroup> = order.into_iter().filter_map(|d| by_disk.remove(&d)).collect();
+    // Online primero, después por nombre de disco.
+    groups.sort_by(|a, b| b.is_online.cmp(&a.is_online).then(a.disk_name.cmp(&b.disk_name)));
+
+    Ok(GatherPlan { groups, total_files, total_bytes, skipped_folders })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2926,5 +3016,32 @@ mod tests {
         let res = search_advanced(&conn, &f, 50).unwrap();
         assert_eq!(res.total, 1);
         assert_eq!(res.items[0].name, "C0001.MP4");
+    }
+
+    #[test]
+    fn gather_plan_groups_files_by_disk() {
+        let mut conn = open_in_memory().unwrap();
+        // Dos discos cargados: SF28 (online) y SF99.
+        ingest_scanned(&mut conn, &sample_disk(), Some("U1"), "ssd", None, "/Volumes/SF28", None).unwrap();
+        let mut other = sample_disk();
+        other.name = "SF99".into();
+        ingest_scanned(&mut conn, &other, Some("U2"), "ssd", None, "/Volumes/SF99", None).unwrap();
+
+        // Elegir un archivo de cada disco + una carpeta (que debe ignorarse).
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM entries WHERE name IN ('C0001.MP4','CLIP')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        let plan = gather_plan(&conn, &ids).unwrap();
+        assert_eq!(plan.total_files, 2, "dos archivos C0001.MP4 (uno por disco)");
+        assert_eq!(plan.skipped_folders, 2, "las dos carpetas CLIP se ignoran");
+        assert_eq!(plan.groups.len(), 2, "un grupo por disco");
+        // El path incluye el nombre del disco.
+        let any = &plan.groups[0].files[0];
+        assert!(any.path.contains("C0001.MP4"));
     }
 }

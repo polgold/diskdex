@@ -13,6 +13,7 @@ import {
   List,
   LayoutGrid,
   ShieldCheck,
+  FolderInput,
 } from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import { useT } from "../lib/i18n";
@@ -21,6 +22,7 @@ import { FILE_CATEGORIES } from "../lib/query-parser";
 import { StatsDialog } from "./StatsDialog";
 import { DuplicatesDialog } from "./DuplicatesDialog";
 import { BackupAuditDialog } from "./BackupAuditDialog";
+import { GatherDialog } from "./GatherDialog";
 import { trashIds } from "./ContentTable";
 
 const CATEGORY_ICONS: Record<string, React.ReactNode> = {
@@ -88,6 +90,7 @@ export function ContentToolbar() {
   const [stats, setStats] = useState(false);
   const [dups, setDups] = useState(false);
   const [backup, setBackup] = useState(false);
+  const [gather, setGather] = useState(false);
 
   function buildRows(): { rows: ExportRow[]; name: string } {
     if (mode === "search") {
@@ -176,13 +179,22 @@ export function ContentToolbar() {
       </button>
 
       {selectedIds.length > 0 && (
-        <button
-          onClick={() => trashIds(selectedIds, reloadCurrent, setError, t)}
-          className="inline-flex items-center gap-1 rounded border border-red-900/60 px-2 py-1 text-xs text-red-300 hover:bg-red-950/50"
-          title={t("toolbar.trashTitle")}
-        >
-          <Trash2 className="h-3.5 w-3.5" /> {t("toolbar.trash", { count: selectedIds.length })}
-        </button>
+        <>
+          <button
+            onClick={() => setGather(true)}
+            className="inline-flex items-center gap-1 rounded border border-sky-900/60 px-2 py-1 text-xs text-sky-300 hover:bg-sky-950/50"
+            title={t("toolbar.gatherTitle")}
+          >
+            <FolderInput className="h-3.5 w-3.5" /> {t("toolbar.gather", { count: selectedIds.length })}
+          </button>
+          <button
+            onClick={() => trashIds(selectedIds, reloadCurrent, setError, t)}
+            className="inline-flex items-center gap-1 rounded border border-red-900/60 px-2 py-1 text-xs text-red-300 hover:bg-red-950/50"
+            title={t("toolbar.trashTitle")}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> {t("toolbar.trash", { count: selectedIds.length })}
+          </button>
+        </>
       )}
 
       <div className="mx-1 h-4 w-px bg-neutral-800" />
@@ -219,6 +231,7 @@ export function ContentToolbar() {
       {stats && <StatsDialog onClose={() => setStats(false)} />}
       {dups && <DuplicatesDialog onClose={() => setDups(false)} />}
       {backup && <BackupAuditDialog onClose={() => setBackup(false)} />}
+      {gather && <GatherDialog entryIds={selectedIds} onClose={() => setGather(false)} />}
     </div>
   );
 }

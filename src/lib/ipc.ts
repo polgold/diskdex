@@ -245,12 +245,38 @@ export interface CopyResult {
   sample: string[];
 }
 
-/** B2 — progreso de copia (evento "copy-progress"). */
+/** B2 — progreso de copia (evento "copy-progress" / "gather-progress"). */
 export interface CopyProgress {
   count: number;
   total: number;
   copied: number;
   bytes: number;
+}
+
+/** D — archivo dentro de un grupo del plan de copia multi-disco. */
+export interface GatherFile {
+  entry_id: number;
+  name: string;
+  size: number;
+  path: string;
+}
+
+/** D — grupo de archivos de un mismo disco. */
+export interface GatherGroup {
+  disk_id: number;
+  disk_name: string;
+  is_online: boolean;
+  total: number;
+  total_bytes: number;
+  files: GatherFile[];
+}
+
+/** D — plan de copia multi-disco (agrupado por disco). */
+export interface GatherPlan {
+  groups: GatherGroup[];
+  total_files: number;
+  total_bytes: number;
+  skipped_folders: number;
 }
 
 export interface ScanSummary {
@@ -352,6 +378,11 @@ export const api = {
   // B2 — copiar lo faltante (requiere ambos discos montados)
   copyMissing: (args: CopyMissingArgs) => invoke<CopyResult>("copy_missing", { args }),
   cancelCopy: (destDiskId: number) => invoke<void>("cancel_copy", { destDiskId }),
+  // D — plan de copia multi-disco (reunir archivos repartidos en varios discos)
+  gatherPlan: (entryIds: number[]) => invoke<GatherPlan>("gather_plan", { entryIds }),
+  gatherCopy: (entryIds: number[], destDir: string) =>
+    invoke<CopyResult>("gather_copy", { args: { entry_ids: entryIds, dest_dir: destDir } }),
+  cancelGather: (destDir: string) => invoke<void>("cancel_gather", { destDir }),
 
   // M5 — escaneo / detección de discos
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),

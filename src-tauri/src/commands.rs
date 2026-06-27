@@ -634,6 +634,127 @@ pub fn copy_missing(
     })
 }
 
+/// D — Plan de copia multi-disco: agrupa los archivos elegidos por disco (online
+/// primero) para guiar la copia disco por disco. OFFLINE: arma el plan sobre el
+/// catálogo, no requiere montar nada.
+#[tauri::command(async)]
+pub fn gather_plan(
+    state: tauri::State<'_, AppState>,
+    entry_ids: Vec<i64>,
+) -> Result<db::GatherPlan, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    db::gather_plan(&cat.conn, &entry_ids).map_err(|e| e.to_string())
+}
+
+/// D — Copia los archivos de UN disco (el que está montado) a `dest_dir`, preservando
+/// `<dest>/<nombre del disco>/<ruta dentro del disco>` (evita colisiones entre discos).
+/// Reusa la copia atómica + verificada por hash; nunca sobreescribe; cancelable.
+#[derive(serde::Deserialize)]
+pub struct GatherCopyArgs {
+    pub entry_ids: Vec<i64>,
+    pub dest_dir: String,
+}
+
+#[tauri::command(async)]
+pub fn gather_copy(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    args: GatherCopyArgs,
+) -> Result<CopyResult, String> {
+    // 1) Resolver origen+destino de cada archivo bajo un lock corto. Los que no se
+    //    puedan resolver (disco offline / archivo ausente) van a `failed`.
+    let dest_root = PathBuf::from(&args.dest_dir);
+    let mut plan: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut failed: Vec<CopyFailure> = Vec::new();
+    {
+        let guard = state.catalog.lock().unwrap();
+        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+        for id in &args.entry_ids {
+            let cat_path = match db::entry_path(&cat.conn, *id) {
+                Ok(p) => p,
+                Err(e) => {
+                    failed.push(CopyFailure { rel_path: format!("entry {id}"), error: e.to_string() });
+                    continue;
+                }
+            };
+            match resolve_real_path(&cat.conn, *id) {
+                Ok(src) => {
+                    // Destino = dest/<disco>/<rel>. comps[0] = nombre del disco.
+                    let comps: Vec<&str> = cat_path.split('/').filter(|s| !s.is_empty()).collect();
+                    let rel: PathBuf = comps.iter().skip(1).collect();
+                    let disk = comps.first().copied().unwrap_or("disco");
+                    let dst = dest_root.join(disk).join(&rel);
+                    plan.push((src, dst));
+                }
+                Err(e) => failed.push(CopyFailure { rel_path: cat_path, error: e }),
+            }
+        }
+    }
+
+    let planned = (plan.len() + failed.len()) as u64;
+    // 2) Copia real (sin lock), con progreso + cancelación.
+    let cancel_key = format!("gather:{}", args.dest_dir);
+    clear_copy_cancel(&cancel_key);
+    let mut copied = 0u64;
+    let mut copied_bytes = 0i64;
+    let mut verified = 0u64;
+    let mut skipped = 0u64;
+    let mut cancelled = false;
+    let total = plan.len() as u64;
+
+    for (i, (src, dst)) in plan.iter().enumerate() {
+        if copy_cancel_requested(&cancel_key) {
+            cancelled = true;
+            break;
+        }
+        if dst.exists() {
+            skipped += 1;
+            continue;
+        }
+        match scan::copy_file_verified(src, dst) {
+            Ok(bytes) => {
+                copied += 1;
+                verified += 1;
+                copied_bytes += bytes as i64;
+            }
+            Err(e) => failed.push(CopyFailure {
+                rel_path: dst.to_string_lossy().to_string(),
+                error: e.to_string(),
+            }),
+        }
+        let _ = app.emit(
+            "gather-progress",
+            CopyProgress { count: (i + 1) as u64, total, copied, bytes: copied_bytes },
+        );
+    }
+    clear_copy_cancel(&cancel_key);
+
+    Ok(CopyResult {
+        dry_run: false,
+        planned,
+        planned_bytes: 0,
+        copied,
+        copied_bytes,
+        verified,
+        skipped,
+        cancelled,
+        failed,
+        sample: Vec::new(),
+    })
+}
+
+/// Cancela una copia "gather" en curso hacia `dest_dir`.
+#[tauri::command(async)]
+pub fn cancel_gather(dest_dir: String) {
+    if let Ok(mut v) = COPY_CANCELS.lock() {
+        let key = format!("gather:{dest_dir}");
+        if !v.iter().any(|m| m == &key) {
+            v.push(key);
+        }
+    }
+}
+
 /// M7: edita el comentario de una entrada.
 #[tauri::command(async)]
 pub fn set_entry_comment(

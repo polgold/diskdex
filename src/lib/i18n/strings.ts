@@ -173,6 +173,24 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.viewTable": "Vista tabla",
     "toolbar.viewGrid": "Vista galería",
     "toolbar.backup": "Backup",
+    "toolbar.gather": "Reunir ({count})",
+    "toolbar.gatherTitle": "Reunir la selección en una carpeta (copia disco por disco)",
+
+    // ── Reunir multi-disco (D) ──
+    "gather.title": "Reunir archivos",
+    "gather.summary": "{files} archivos · {bytes} · {disks} discos",
+    "gather.skippedFolders": "{n} carpetas omitidas",
+    "gather.refresh": "Actualizar discos",
+    "gather.pickDest": "Elegí la carpeta destino",
+    "gather.noDest": "Sin carpeta destino elegida",
+    "gather.chooseDest": "Elegir destino…",
+    "gather.groupCount": "{n} archivos · {bytes}",
+    "gather.copyGroup": "Copiar",
+    "gather.copying": "Copiando {count}/{total}…",
+    "gather.copiedN": "{n} copiados ({skipped} ya estaban)",
+    "gather.failedN": "{n} fallaron",
+    "gather.connect": "Conectá {name}",
+    "gather.help": "Conectá cada disco y copiá su grupo. Se preserva la estructura por disco; no se sobreescribe nada y cada archivo se verifica por hash.",
 
     // ── Auditoría de backup (B1) ──
     "backup.title": "Auditar backup",
@@ -571,6 +589,24 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.viewTable": "Table view",
     "toolbar.viewGrid": "Gallery view",
     "toolbar.backup": "Backup",
+    "toolbar.gather": "Gather ({count})",
+    "toolbar.gatherTitle": "Gather the selection into a folder (copy disk by disk)",
+
+    // ── Multi-disk gather (D) ──
+    "gather.title": "Gather files",
+    "gather.summary": "{files} files · {bytes} · {disks} disks",
+    "gather.skippedFolders": "{n} folders skipped",
+    "gather.refresh": "Refresh disks",
+    "gather.pickDest": "Choose the destination folder",
+    "gather.noDest": "No destination folder chosen",
+    "gather.chooseDest": "Choose destination…",
+    "gather.groupCount": "{n} files · {bytes}",
+    "gather.copyGroup": "Copy",
+    "gather.copying": "Copying {count}/{total}…",
+    "gather.copiedN": "{n} copied ({skipped} already there)",
+    "gather.failedN": "{n} failed",
+    "gather.connect": "Connect {name}",
+    "gather.help": "Connect each disk and copy its group. Per-disk structure is preserved; nothing is overwritten and each file is hash-verified.",
 
     // ── Backup audit (B1) ──
     "backup.title": "Backup audit",

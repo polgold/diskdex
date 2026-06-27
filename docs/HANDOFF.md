@@ -293,8 +293,17 @@ M9 (conector seguro — empezar por malla Tailscale + `GET /v1/file` read-only a
       caso puro-filtros (sin concepto visual) va por searchAdvanced y sí los aplica.
 
 ### Bloque D — Plan de copia multi-disco
-- [ ] **D1. `GatherPlan`** + sesión guiada disco-por-disco **reanudable** ("conectá SF41 →
-      copio 12 → conectá SF28 → …"), sobre el motor de copia de B2 + el watcher de volúmenes.
+- [x] **D1. `GatherPlan`** + sesión guiada disco-por-disco — ✅ HECHO (uncommitted).
+      `db::gather_plan(entry_ids)` agrupa los archivos elegidos por disco (online primero;
+      carpetas omitidas, se reporta el conteo) → `GatherPlan{groups, total_files/bytes}`. Comandos
+      `gather_plan` + `gather_copy(args{entry_ids,dest_dir})` (copia los archivos de UN disco montado
+      a `<dest>/<disco>/<rel>` con `copy_file_verified`: atómica + verificada por hash, nunca
+      sobreescribe, evento `gather-progress`, `cancel_gather`) + reuso de `CopyResult`. UI:
+      [`GatherDialog`](../src/components/GatherDialog.tsx) (botón **"Reunir (N)"** en ContentToolbar
+      cuando hay selección): plan por disco, elegir destino, copiar grupo a grupo, "Actualizar discos"
+      para detectar el que conectás, marca hechos (reanudable en sesión). i18n gather.* ES/EN.
+      Test `gather_plan_groups_files_by_disk` (71 cargo tests; tsc limpio).
+      **Follow-up D-folders:** las carpetas seleccionadas se omiten; falta expandirlas a sus archivos.
 
 ### Bloque E — Cloud storage
 - [ ] **E1. Cloud Fase 1**: carpeta sincronizada (iCloud/Dropbox/Drive) como "disco cloud" +

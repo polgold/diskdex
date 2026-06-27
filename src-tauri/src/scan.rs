@@ -33,6 +33,11 @@ pub struct ScanOptions {
     /// defecto NO se excluye nada, para que el catálogo sea completo (p.ej. poder
     /// buscar carpetas "Caches" y vaciarlas cuando el disco se llena).
     pub exclude_junk: bool,
+    /// Escaneo ENRIQUECIDO (opt-in): tras el recorrido, lee el contenido de cada
+    /// archivo para calcular su hash BLAKE3 (auditoría de backup por contenido) y
+    /// —a futuro— su metadata de cámara/GPS. CARO (lee todos los bytes del disco),
+    /// por eso es opcional. Ver `enrich_entries`.
+    pub enrich: bool,
 }
 
 /// Basura típica que infla/ralentiza el escaneo (dependencias, control de
@@ -58,6 +63,7 @@ impl Default for ScanOptions {
             exclude_names: Vec::new(),
             force_full: false,
             exclude_junk: false,
+            enrich: false,
         }
     }
 }
@@ -249,6 +255,156 @@ pub fn scan_volume_cb(
         name: volume_name.to_string(),
         entries,
     })
+}
+
+/// Enriquecimiento por entrada (alineado por índice con `DcmfDisk::entries`):
+/// hash de contenido (BLAKE3) y —a futuro— metadata de cámara/GPS. Se computa
+/// aparte del recorrido porque es CARO (lee el contenido de cada archivo). Las
+/// carpetas y los archivos que no se pudieron leer quedan en `None`.
+#[derive(Debug, Clone, Default)]
+pub struct EntryEnrichment {
+    pub content_hash: Option<String>,
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
+    pub gps_place: Option<String>,
+    pub captured_at: Option<i64>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+}
+
+/// Hash BLAKE3 (hex) del contenido de un archivo, leído en streaming (no carga el
+/// archivo entero en memoria → seguro para clips de decenas de GB).
+pub fn hash_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut f = fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20]; // 1 MiB
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Copia `src` → `dst` de forma atómica y VERIFICADA (B2). Escribe a un temporal
+/// `<dst>.ddtmp` mientras calcula el BLAKE3 del origen en una sola lectura, hace
+/// `fsync` + `rename` (atómico: nunca deja un archivo a medias en el destino), y
+/// re-hashea el destino para confirmar que coincide. Si la verificación falla,
+/// borra el destino y devuelve error. Crea los directorios padre. NO sobreescribe:
+/// el llamador debe garantizar que `dst` no exista. Devuelve los bytes copiados.
+pub fn copy_file_verified(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    use std::io::{Read, Write};
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // Temporal junto al destino (mismo volumen → rename atómico).
+    let mut tmp_os = dst.as_os_str().to_owned();
+    tmp_os.push(".ddtmp");
+    let tmp = PathBuf::from(tmp_os);
+
+    let mut fin = fs::File::open(src)?;
+    let mut fout = fs::File::create(&tmp)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total: u64 = 0;
+    loop {
+        let n = fin.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        fout.write_all(&buf[..n])?;
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    fout.sync_all()?;
+    drop(fout);
+    let src_hash = hasher.finalize().to_hex().to_string();
+
+    // Publicar el destino de forma atómica.
+    if let Err(e) = fs::rename(&tmp, dst) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Verificar: el contenido en destino debe hashear igual que el origen.
+    match hash_file(dst) {
+        Ok(dst_hash) if dst_hash == src_hash => Ok(total),
+        Ok(_) => {
+            let _ = fs::remove_file(dst);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "la verificación de hash falló tras copiar (destino distinto del origen)",
+            ))
+        }
+        Err(e) => {
+            let _ = fs::remove_file(dst);
+            Err(e)
+        }
+    }
+}
+
+/// Computa el enriquecimiento (hoy: hash BLAKE3) de cada archivo del árbol ya
+/// escaneado. Reconstruye la ruta real de cada entrada bajo `root` (vía
+/// `rel_paths`), por lo que requiere el disco montado. Reporta avance con
+/// `progress(archivos_procesados, bytes_leídos)` y respeta `cancel()` (devuelve
+/// `Interrupted`). Un archivo ilegible (permiso/desmontado) queda en `None`, no
+/// aborta el resto.
+pub fn enrich_entries(
+    root: &Path,
+    disk: &DcmfDisk,
+    progress: &mut dyn FnMut(u64, u64),
+    cancel: &dyn Fn() -> bool,
+) -> std::io::Result<Vec<EntryEnrichment>> {
+    let rels = rel_paths(disk);
+    let mut out = vec![EntryEnrichment::default(); disk.entries.len()];
+    let mut files_done: u64 = 0;
+    let mut bytes_done: u64 = 0;
+    for (k, e) in disk.entries.iter().enumerate() {
+        if e.is_folder {
+            continue;
+        }
+        if cancel() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "enriquecimiento cancelado",
+            ));
+        }
+        let path = root.join(&rels[k]);
+        if let Ok(h) = hash_file(&path) {
+            out[k].content_hash = Some(h);
+        }
+        // Metadata de ubicación/cámara/fecha para videos (ffprobe, A2-meta). Degrada
+        // sin error si ffprobe no está o el clip no trae GPS. Las coordenadas se
+        // resuelven a nombre de lugar (gps_place) en un paso posterior (reverse-geocode).
+        if let Some((_, ext)) = e.name.rsplit_once('.') {
+            if crate::video::is_location_video_ext(ext) {
+                if let Ok(loc) = crate::video::probe_location(&path) {
+                    if !loc.is_empty() {
+                        out[k].gps_lat = loc.gps_lat;
+                        out[k].gps_lon = loc.gps_lon;
+                        out[k].captured_at = loc.captured_at;
+                        out[k].camera_make = loc.camera_make;
+                        out[k].camera_model = loc.camera_model;
+                        // C1: resolver coordenadas → nombre de lugar (offline) para búsqueda.
+                        if let (Some(lat), Some(lon)) = (loc.gps_lat, loc.gps_lon) {
+                            out[k].gps_place = crate::geo::place_for(lat, lon);
+                        }
+                    }
+                }
+            }
+        }
+        files_done += 1;
+        bytes_done = bytes_done.saturating_add(e.size_logical);
+        // Reportar avance sin saturar el canal de eventos.
+        if files_done % 64 == 0 {
+            progress(files_done, bytes_done);
+        }
+    }
+    progress(files_done, bytes_done);
+    Ok(out)
 }
 
 /// Ruta relativa (con `/`) de cada entrada del árbol viejo respecto de la raíz.
@@ -692,6 +848,56 @@ mod tests {
 
         let clip = disk.entries.iter().find(|e| e.name == "CLIP").unwrap();
         assert!(clip.is_folder);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn enrich_computes_blake3_per_file() {
+        let base = std::env::temp_dir().join(format!("diskdex_enrich_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("CLIP")).unwrap();
+        fs::write(base.join("CLIP").join("a.mov"), b"hello world").unwrap();
+        fs::write(base.join("readme.txt"), b"hello").unwrap();
+
+        let disk = scan_volume(&base, "TESTVOL", &ScanOptions::default()).unwrap();
+        let enr = enrich_entries(&base, &disk, &mut |_, _| {}, &|| false).unwrap();
+        assert_eq!(enr.len(), disk.entries.len());
+
+        // El hash de cada archivo coincide con BLAKE3 del contenido; las carpetas no tienen hash.
+        for (k, e) in disk.entries.iter().enumerate() {
+            if e.is_folder {
+                assert!(enr[k].content_hash.is_none(), "las carpetas no llevan hash");
+            } else {
+                assert!(enr[k].content_hash.is_some(), "los archivos deben tener hash");
+            }
+        }
+        let mov_idx = disk.entries.iter().position(|e| e.name == "a.mov").unwrap();
+        let expected = blake3::hash(b"hello world").to_hex().to_string();
+        assert_eq!(enr[mov_idx].content_hash.as_deref(), Some(expected.as_str()));
+
+        // Cancelación: devuelve Interrupted.
+        let cancelled = enrich_entries(&base, &disk, &mut |_, _| {}, &|| true);
+        assert!(cancelled.is_err());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn copy_file_verified_copies_and_verifies() {
+        let base = std::env::temp_dir().join(format!("diskdex_copy_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let src = base.join("src.bin");
+        fs::write(&src, b"contenido de prueba del clip").unwrap();
+        // Destino en un subdirectorio inexistente: copy_file_verified crea los padres.
+        let dst = base.join("BACKUP/DCIM/src.bin");
+
+        let bytes = copy_file_verified(&src, &dst).unwrap();
+        assert_eq!(bytes, "contenido de prueba del clip".len() as u64);
+        assert_eq!(fs::read(&dst).unwrap(), b"contenido de prueba del clip");
+        // No quedó ningún temporal.
+        assert!(!base.join("BACKUP/DCIM/src.bin.ddtmp").exists());
 
         let _ = fs::remove_dir_all(&base);
     }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Folder, File as FileIcon, Info, FolderSearch, ExternalLink, Copy, Check, Tag, X, Film, Package, FolderClosed } from "lucide-react";
-import { api, type EntryRow, type VideoMeta, type ArchiveEntry } from "../lib/ipc";
+import { Folder, File as FileIcon, Info, FolderSearch, ExternalLink, Copy, Check, Tag, X, Film, Package, FolderClosed, MapPin } from "lucide-react";
+import { api, type EntryRow, type VideoMeta, type ArchiveEntry, type EntryMeta } from "../lib/ipc";
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatDate, formatDuration, formatBitrate, formatCount } from "../lib/format";
 import { revealOriginal, openOriginal, copyText } from "../lib/actions";
@@ -59,6 +59,8 @@ export function Inspector() {
 
       <VideoInfo entry={entry} />
 
+      <MetaInfo entry={entry} />
+
       <ArchiveContents entry={entry} />
 
       <dl className="mt-4 space-y-2.5 text-xs">
@@ -89,6 +91,48 @@ export function Inspector() {
       <TagEditor entry={entry} />
 
       <CommentEditor entry={entry} />
+    </div>
+  );
+}
+
+/** A2-meta: GPS / cámara / fecha de captura / hash, si el escaneo los extrajo. */
+function MetaInfo({ entry }: { entry: EntryRow }) {
+  const t = useT();
+  const [meta, setMeta] = useState<EntryMeta | null>(null);
+
+  useEffect(() => {
+    if (entry.is_folder) {
+      setMeta(null);
+      return;
+    }
+    let cancelled = false;
+    api.getEntryMeta(entry.id).then((m) => !cancelled && setMeta(m));
+    return () => {
+      cancelled = true;
+    };
+  }, [entry.id, entry.is_folder]);
+
+  if (!meta) return null;
+  const hasAny =
+    meta.content_hash || meta.gps_lat != null || meta.gps_place || meta.captured_at != null || meta.camera_make || meta.camera_model;
+  if (!hasAny) return null;
+
+  const camera = [meta.camera_make, meta.camera_model].filter(Boolean).join(" ");
+  const coords =
+    meta.gps_lat != null && meta.gps_lon != null ? `${meta.gps_lat.toFixed(5)}, ${meta.gps_lon.toFixed(5)}` : null;
+
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-neutral-900/40 p-2.5">
+      <h3 className="mb-2 flex items-center gap-1.5 text-xs font-medium text-neutral-300">
+        <MapPin className="h-3.5 w-3.5 text-sky-400" /> {t("inspector.metaTitle")}
+      </h3>
+      <dl className="space-y-2 text-xs">
+        {meta.gps_place && <Field label={t("inspector.place")} value={meta.gps_place} />}
+        {coords && <Field label={t("inspector.coords")} value={coords} mono />}
+        {camera && <Field label={t("inspector.camera")} value={camera} />}
+        {meta.captured_at != null && <Field label={t("inspector.captured")} value={formatDate(meta.captured_at)} mono />}
+        {meta.content_hash && <Field label={t("inspector.hash")} value={`${meta.content_hash.slice(0, 16)}…`} mono />}
+      </dl>
     </div>
   );
 }

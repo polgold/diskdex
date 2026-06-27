@@ -63,6 +63,17 @@ export interface EntryRow {
   child_count: number;
 }
 
+/** A2/A2-meta — metadata enriquecida de una entrada (hash + GPS/cámara/captura). */
+export interface EntryMeta {
+  content_hash: string | null;
+  gps_lat: number | null;
+  gps_lon: number | null;
+  gps_place: string | null;
+  captured_at: number | null;
+  camera_make: string | null;
+  camera_model: string | null;
+}
+
 export interface ExtStat {
   ext: string;
   count: number;
@@ -173,6 +184,72 @@ export interface ScanOptions {
   force_full?: boolean;
   /** Excluir basura (node_modules, caches, papeleras…). Opt-in. */
   exclude_junk?: boolean;
+  /** Escaneo enriquecido: calcula hash BLAKE3 por archivo (auditoría de backup). Opt-in, lento. */
+  enrich?: boolean;
+}
+
+/** B1 — referencia a un archivo del source en el reporte de backup. */
+export interface FileRef {
+  entry_id: number;
+  rel_path: string;
+  name: string;
+  size: number;
+}
+
+/** B1 — resultado de comparar un subárbol source contra uno destination. */
+export interface BackupReport {
+  ok: number;
+  missing: FileRef[];
+  mismatch: FileRef[];
+  unverified: FileRef[];
+  extra: number;
+  missing_bytes: number;
+  source_total: number;
+  fully_backed_up: boolean;
+}
+
+/** B1 — args para `compare_backup`. `*_entry_id` opcional = comparar disco entero. */
+export interface CompareArgs {
+  source_disk_id: number;
+  source_entry_id?: number | null;
+  dest_disk_id: number;
+  dest_entry_id?: number | null;
+}
+
+/** B2 — args para `copy_missing`. `dry_run` = solo plan, no escribe. */
+export interface CopyMissingArgs {
+  source_disk_id: number;
+  source_entry_id?: number | null;
+  dest_disk_id: number;
+  dest_entry_id?: number | null;
+  dry_run: boolean;
+}
+
+export interface CopyFailure {
+  rel_path: string;
+  error: string;
+}
+
+/** B2 — resultado de copiar lo faltante. */
+export interface CopyResult {
+  dry_run: boolean;
+  planned: number;
+  planned_bytes: number;
+  copied: number;
+  copied_bytes: number;
+  verified: number;
+  skipped: number;
+  cancelled: boolean;
+  failed: CopyFailure[];
+  sample: string[];
+}
+
+/** B2 — progreso de copia (evento "copy-progress"). */
+export interface CopyProgress {
+  count: number;
+  total: number;
+  copied: number;
+  bytes: number;
 }
 
 export interface ScanSummary {
@@ -207,6 +284,7 @@ export const api = {
     invoke<EntryRow[]>("list_children", { diskId, parentId }),
   entryPath: (entryId: number) => invoke<string>("entry_path", { entryId }),
   getEntry: (entryId: number) => invoke<EntryRow | null>("get_entry", { entryId }),
+  getEntryMeta: (entryId: number) => invoke<EntryMeta>("get_entry_meta", { entryId }),
 
   // M3 — búsqueda por nombre
   searchEntries: (query: string, limit?: number) =>
@@ -268,6 +346,12 @@ export const api = {
   findDuplicates: (minSize?: number, limit?: number) =>
     invoke<DupGroup[]>("find_duplicates", { minSize, limit }),
 
+  // B1 — auditoría de backup (comparar source vs dest, offline)
+  compareBackup: (args: CompareArgs) => invoke<BackupReport>("compare_backup", { args }),
+  // B2 — copiar lo faltante (requiere ambos discos montados)
+  copyMissing: (args: CopyMissingArgs) => invoke<CopyResult>("copy_missing", { args }),
+  cancelCopy: (destDiskId: number) => invoke<void>("cancel_copy", { destDiskId }),
+
   // M5 — escaneo / detección de discos
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),
   scanDisk: (mountPath: string, name?: string, options?: ScanOptions) =>
@@ -283,7 +367,46 @@ export const api = {
   agentPairCode: () => invoke<string>("agent_pair_code"),
   agentDevices: () => invoke<DeviceRow[]>("agent_devices"),
   agentRevoke: (deviceId: string, revoked: boolean) => invoke<void>("agent_revoke", { deviceId, revoked }),
+
+  // IA — búsqueda semántica de imágenes (Fase 1)
+  aiAvailable: () => invoke<boolean>("ai_available"),
+  aiStatus: () => invoke<AiStatus>("ai_status"),
+  aiIndex: (rebuild?: boolean) => invoke<number>("ai_index", { rebuild }),
+  aiSearch: (query: string, threshold?: number, limit?: number) =>
+    invoke<SemanticItem[]>("ai_search", { query, threshold, limit }),
+  // Fase 2 — indexa el contenido de los videos de un disco montado (muestreo de frames)
+  aiIndexVideos: (diskId: number, frames?: number) =>
+    invoke<number>("ai_index_videos", { diskId, frames }),
+  // Fase 5 — buscar archivos visualmente similares a uno dado (reusa embeddings)
+  aiSimilar: (entryId: number, threshold?: number, limit?: number) =>
+    invoke<SemanticItem[]>("ai_similar", { entryId, threshold, limit }),
+  // Fase 5 — duplicados visuales (near-dups por contenido, mismo shape que findDuplicates)
+  aiVisualDuplicates: (threshold?: number, minSize?: number, limit?: number) =>
+    invoke<DupGroup[]>("ai_visual_duplicates", { threshold, minSize, limit }),
 };
+
+export interface AiStatus {
+  available: boolean;
+  loaded: boolean;
+  model: string;
+  embedded: number;
+  candidates: number;
+}
+
+export interface SemanticItem extends SearchItem {
+  score: number;
+  /** Segundo del clip donde mejor matchea (null para imágenes). */
+  frame_ts: number | null;
+}
+
+// Progreso del indexado semántico. `total = -1` mientras carga el modelo.
+export interface AiIndexProgress {
+  done: number;
+  total: number;
+  phase?: "loading";
+}
+export const onAiIndexProgress = (cb: (p: AiIndexProgress) => void): Promise<UnlistenFn> =>
+  listen<AiIndexProgress>("ai://index", (e) => cb(e.payload));
 
 export interface AgentStatus {
   running: boolean;

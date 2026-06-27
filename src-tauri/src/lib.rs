@@ -1,11 +1,19 @@
 // DiskDex — app de catálogo de discos (compatible DiskCatalogMaker).
 // Toda la lógica de FS/parsing vive en el lado nativo (Rust); la UI consume IPC.
 
+// BLAS de Apple (feature `accel`): fuerza al linker a incluir Accelerate para
+// que candle lo use en el matmul (CPU rápido) — ver módulo `ai`.
+#[cfg(feature = "accel")]
+extern crate accelerate_src;
+
+#[cfg(feature = "ai")]
+pub mod ai;
 pub mod agent;
 pub mod archive;
 mod commands;
 pub mod db;
 pub mod dcmf;
+pub mod geo;
 pub mod scan;
 pub mod video;
 
@@ -82,6 +90,7 @@ pub fn run() {
             commands::list_children,
             commands::entry_path,
             commands::get_entry,
+            commands::get_entry_meta,
             commands::search_entries,
             commands::search_advanced,
             commands::resolve_fs_path,
@@ -105,6 +114,9 @@ pub fn run() {
             commands::delete_disk,
             commands::catalog_stats,
             commands::find_duplicates,
+            commands::compare_backup,
+            commands::copy_missing,
+            commands::cancel_copy,
             commands::write_text_file,
             commands::save_session,
             commands::load_session,
@@ -119,6 +131,13 @@ pub fn run() {
             commands::cancel_scan,
             commands::start_volume_watch,
             commands::refresh_online_status,
+            commands::ai_available,
+            commands::ai_status,
+            commands::ai_index,
+            commands::ai_search,
+            commands::ai_index_videos,
+            commands::ai_similar,
+            commands::ai_visual_duplicates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

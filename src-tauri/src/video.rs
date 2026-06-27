@@ -130,6 +130,166 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
     Ok(meta)
 }
 
+// ───────────────────────── Metadata de ubicación / cámara (A2-meta) ─────────────────────────
+
+/// Extensiones de video que vale la pena sondear con ffprobe para GPS/cámara/fecha.
+const LOCATION_VIDEO_EXTS: &[&str] = &[
+    "mp4", "mov", "m4v", "avi", "mkv", "mxf", "mts", "m2ts", "wmv", "webm", "mpg", "mpeg", "3gp", "insv",
+];
+
+/// ¿La extensión (sin punto, cualquier caja) es un video que sondeamos por ubicación?
+pub fn is_location_video_ext(ext: &str) -> bool {
+    LOCATION_VIDEO_EXTS.contains(&ext.to_lowercase().as_str())
+}
+
+/// Metadata de cámara/ubicación extraída de un clip (A2-meta).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LocationMeta {
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
+    pub captured_at: Option<i64>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+}
+
+impl LocationMeta {
+    pub fn is_empty(&self) -> bool {
+        self.gps_lat.is_none()
+            && self.gps_lon.is_none()
+            && self.captured_at.is_none()
+            && self.camera_make.is_none()
+            && self.camera_model.is_none()
+    }
+}
+
+/// Parsea ISO 6709 (`+34.0522-118.2437/`, con o sin altitud) → (lat, lon).
+/// Sony/Canon/QuickTime guardan la ubicación así en el tag de formato.
+fn parse_iso6709(s: &str) -> Option<(f64, f64)> {
+    let s = s.trim().trim_end_matches('/');
+    // Posiciones de los signos (+/-) que delimitan los campos lat/lon/alt.
+    let signs: Vec<usize> = s
+        .char_indices()
+        .filter(|(_, c)| *c == '+' || *c == '-')
+        .map(|(i, _)| i)
+        .collect();
+    if signs.len() < 2 {
+        return None;
+    }
+    let lat: f64 = s[signs[0]..signs[1]].parse().ok()?;
+    let lon_end = if signs.len() >= 3 { signs[2] } else { s.len() };
+    let lon: f64 = s[signs[1]..lon_end].parse().ok()?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    Some((lat, lon))
+}
+
+/// Días civiles desde 1970-01-01 (algoritmo de Howard Hinnant).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Parsea un timestamp tipo `2023-06-01T12:34:56.000000Z` → unix secs (asume UTC).
+/// Ignora la fracción y el offset (suele venir `Z`). Devuelve None si no matchea.
+fn parse_iso8601_to_unix(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date, time) = s.split_once(['T', ' '])?;
+    let mut dp = date.split('-');
+    let y: i64 = dp.next()?.parse().ok()?;
+    let mo: i64 = dp.next()?.parse().ok()?;
+    let d: i64 = dp.next()?.parse().ok()?;
+    // Recortar fracción/zona del tiempo (quedarnos con HH:MM:SS).
+    let time = &time[..time.len().min(8)];
+    let mut tp = time.split(':');
+    let hh: i64 = tp.next()?.parse().ok()?;
+    let mm: i64 = tp.next()?.parse().ok()?;
+    let ss: i64 = tp.next().unwrap_or("0").parse().unwrap_or(0);
+    if mo < 1 || mo > 12 || d < 1 || d > 31 {
+        return None;
+    }
+    Some(days_from_civil(y, mo, d) * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Busca en un objeto de tags JSON el primer valor cuya clave (en minúsculas)
+/// contenga alguno de los `needles`. ffprobe normaliza muchos tags de QuickTime.
+fn tag_lookup<'a>(tags: &'a serde_json::Value, needles: &[&str]) -> Option<&'a str> {
+    let obj = tags.as_object()?;
+    for (k, v) in obj {
+        let kl = k.to_lowercase();
+        if needles.iter().any(|n| kl.contains(n)) {
+            if let Some(s) = v.as_str() {
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extrae GPS / cámara / fecha de captura de un clip con `ffprobe` (tags de
+/// `format` y de streams). Degrada con elegancia: si ffprobe no está o el clip no
+/// trae estos tags, devuelve un `LocationMeta` vacío sin error fatal.
+pub fn probe_location(path: &Path) -> Result<LocationMeta, String> {
+    let bin = which("ffprobe").ok_or("ffprobe no está disponible")?;
+    let out = Command::new(bin)
+        .args(["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams"])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("no se pudo ejecutar ffprobe: {e}"))?;
+    if !out.status.success() {
+        return Err("ffprobe falló al leer el archivo".into());
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("salida de ffprobe inválida: {e}"))?;
+
+    // Recolectar todos los objetos de tags (format + cada stream).
+    let mut tag_objs: Vec<&serde_json::Value> = Vec::new();
+    if let Some(t) = json.get("format").and_then(|f| f.get("tags")) {
+        tag_objs.push(t);
+    }
+    if let Some(streams) = json.get("streams").and_then(|v| v.as_array()) {
+        for s in streams {
+            if let Some(t) = s.get("tags") {
+                tag_objs.push(t);
+            }
+        }
+    }
+
+    let mut meta = LocationMeta::default();
+    for tags in &tag_objs {
+        if meta.gps_lat.is_none() {
+            if let Some(loc) = tag_lookup(tags, &["location", "iso6709", "gps"]) {
+                if let Some((lat, lon)) = parse_iso6709(loc) {
+                    meta.gps_lat = Some(lat);
+                    meta.gps_lon = Some(lon);
+                }
+            }
+        }
+        if meta.camera_make.is_none() {
+            if let Some(m) = tag_lookup(tags, &["make", "manufacturer"]) {
+                meta.camera_make = Some(m.to_string());
+            }
+        }
+        if meta.camera_model.is_none() {
+            if let Some(m) = tag_lookup(tags, &["model"]) {
+                meta.camera_model = Some(m.to_string());
+            }
+        }
+        if meta.captured_at.is_none() {
+            if let Some(c) = tag_lookup(tags, &["creation_time", "creationdate", "date"]) {
+                meta.captured_at = parse_iso8601_to_unix(c);
+            }
+        }
+    }
+    Ok(meta)
+}
+
 /// Extrae un frame JPEG en el segundo `at_secs`, escalado a `max_w` de ancho.
 pub fn extract_frame(path: &Path, at_secs: f64, max_w: u32) -> Result<Vec<u8>, String> {
     let bin = which("ffmpeg").ok_or("ffmpeg no está disponible")?;
@@ -222,5 +382,34 @@ mod tests {
     #[test]
     fn strip_handles_zero_duration() {
         assert_eq!(strip_timestamps(0, 5), vec![0.0]);
+    }
+
+    #[test]
+    fn parses_iso6709() {
+        let (lat, lon) = parse_iso6709("+34.0522-118.2437/").unwrap();
+        assert!((lat - 34.0522).abs() < 1e-6);
+        assert!((lon + 118.2437).abs() < 1e-6);
+        // Con altitud.
+        let (lat, lon) = parse_iso6709("+27.5916+086.5640+8850/").unwrap();
+        assert!((lat - 27.5916).abs() < 1e-6);
+        assert!((lon - 86.5640).abs() < 1e-6);
+        // Basura / fuera de rango → None.
+        assert!(parse_iso6709("nope").is_none());
+        assert!(parse_iso6709("+999.0+000.0/").is_none());
+    }
+
+    #[test]
+    fn parses_iso8601() {
+        // 2023-06-01T00:00:00Z = 1685577600 (UTC).
+        assert_eq!(parse_iso8601_to_unix("2023-06-01T00:00:00.000000Z"), Some(1_685_577_600));
+        assert_eq!(parse_iso8601_to_unix("1970-01-01T00:00:00Z"), Some(0));
+        assert!(parse_iso8601_to_unix("not-a-date").is_none());
+    }
+
+    #[test]
+    fn location_video_ext_check() {
+        assert!(is_location_video_ext("MOV"));
+        assert!(is_location_video_ext("mp4"));
+        assert!(!is_location_video_ext("jpg"));
     }
 }

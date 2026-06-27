@@ -20,7 +20,7 @@ fn main() {
     let disk = scan::scan_volume(&root, &name, &ScanOptions::default()).expect("scan");
     let mut conn = db::open(std::path::Path::new(&catalog)).expect("open");
     let fp = scan::volume_fingerprint(&root);
-    db::ingest_scanned(&mut conn, &disk, fp.as_deref(), "disk", None, &folder).expect("ingest");
+    db::ingest_scanned(&mut conn, &disk, fp.as_deref(), "disk", None, &folder, None).expect("ingest");
 
     let entry_id: i64 = conn
         .query_row(

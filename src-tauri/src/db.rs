@@ -6,6 +6,7 @@
 //! rápido que mantenerlo por triggers durante una carga de millones de filas).
 
 use crate::dcmf::{DcmfDisk, DcmfEntry};
+use crate::scan::EntryEnrichment;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -28,6 +29,49 @@ pub struct EntryRow {
     pub comment: Option<String>,
     /// Cantidad de hijos directos (para mostrar disclosure en el árbol sin contar aparte).
     pub child_count: i64,
+}
+
+/// Metadata enriquecida de una entrada (A2/A2-meta): hash + GPS/cámara/captura.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct EntryMeta {
+    pub content_hash: Option<String>,
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
+    pub gps_place: Option<String>,
+    pub captured_at: Option<i64>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+}
+
+impl EntryMeta {
+    pub fn is_empty(&self) -> bool {
+        self.content_hash.is_none()
+            && self.gps_lat.is_none()
+            && self.gps_place.is_none()
+            && self.captured_at.is_none()
+            && self.camera_make.is_none()
+            && self.camera_model.is_none()
+    }
+}
+
+/// Lee la metadata enriquecida de una entrada (columnas A2/A2-meta).
+pub fn get_entry_meta(conn: &Connection, entry_id: i64) -> DbResult<EntryMeta> {
+    conn.query_row(
+        "SELECT content_hash, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model \
+         FROM entries WHERE id = ?1",
+        params![entry_id],
+        |r| {
+            Ok(EntryMeta {
+                content_hash: r.get(0)?,
+                gps_lat: r.get(1)?,
+                gps_lon: r.get(2)?,
+                gps_place: r.get(3)?,
+                captured_at: r.get(4)?,
+                camera_make: r.get(5)?,
+                camera_model: r.get(6)?,
+            })
+        },
+    )
 }
 
 /// Resultado de búsqueda (M3): incluye disco y ruta completa.
@@ -137,6 +181,21 @@ CREATE TABLE IF NOT EXISTS video_frames (
 );
 CREATE INDEX IF NOT EXISTS idx_video_frames_entry ON video_frames(entry_id);
 
+-- Embeddings semánticos (IA): un vector por entrada visual. Para imágenes hay
+-- UNA fila (frame_ts NULL); para VIDEO hay varias (una por frame muestreado, con
+-- `frame_ts` en segundos) → permite "buscar el momento" dentro del clip. `vec` es
+-- f32[] en bytes little-endian; `model` permite reindexar si se cambia de modelo.
+CREATE TABLE IF NOT EXISTS embeddings (
+  id       INTEGER PRIMARY KEY,
+  entry_id INTEGER NOT NULL,
+  model    TEXT NOT NULL,
+  frame_ts REAL,
+  dim      INTEGER NOT NULL,
+  vec      BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
+CREATE INDEX IF NOT EXISTS idx_embeddings_entry ON embeddings(entry_id, model);
+
 -- Contenido indexado de archivos comprimidos (Fase B): ZIP/7z/RAR.
 CREATE TABLE IF NOT EXISTS archive_entries (
   id       INTEGER PRIMARY KEY,
@@ -163,6 +222,7 @@ CREATE TABLE IF NOT EXISTS devices (
 pub fn open(path: &Path) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
+    apply_migrations(&conn)?;
     Ok(conn)
 }
 
@@ -170,7 +230,54 @@ pub fn open(path: &Path) -> DbResult<Connection> {
 pub fn open_in_memory() -> DbResult<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(SCHEMA)?;
+    apply_migrations(&conn)?;
     Ok(conn)
+}
+
+/// Migraciones aditivas sobre catálogos ya existentes. `CREATE TABLE IF NOT EXISTS`
+/// (en `SCHEMA`) no agrega columnas nuevas a una tabla creada por una versión vieja,
+/// así que las columnas incorporadas después del esquema base se agregan acá con
+/// `ALTER TABLE ... ADD COLUMN`. Idempotente: ignora el error "duplicate column name"
+/// cuando la columna ya existe (re-apertura del mismo catálogo). Aditivo y de bajo
+/// riesgo: no toca ni reescribe filas existentes; las columnas nuevas quedan NULL
+/// hasta que un escaneo enriquecido las pueble.
+///
+/// Columnas agregadas (roadmap features nuevas, ver docs/DISENO-cloud-y-backup.md):
+/// - `entries.content_hash/hashed_at` → auditoría de backup por hash (BLAKE3).
+/// - `entries.gps_lat/gps_lon/gps_place/captured_at/camera_make/camera_model` →
+///   metadata de cámara y búsqueda por ubicación ("clips de Jujuy").
+/// - `entries.cloud_state` → 0=local, 1=placeholder solo-en-la-nube.
+/// - `disks.cloud_provider/cloud_root` → carpeta sincronizada como disco cloud.
+fn apply_migrations(conn: &Connection) -> DbResult<()> {
+    const ADD_COLUMNS: &[&str] = &[
+        "ALTER TABLE entries ADD COLUMN content_hash TEXT",
+        "ALTER TABLE entries ADD COLUMN hashed_at    INTEGER",
+        "ALTER TABLE entries ADD COLUMN cloud_state  INTEGER DEFAULT 0",
+        "ALTER TABLE entries ADD COLUMN gps_lat      REAL",
+        "ALTER TABLE entries ADD COLUMN gps_lon      REAL",
+        "ALTER TABLE entries ADD COLUMN gps_place    TEXT",
+        "ALTER TABLE entries ADD COLUMN captured_at  INTEGER",
+        "ALTER TABLE entries ADD COLUMN camera_make  TEXT",
+        "ALTER TABLE entries ADD COLUMN camera_model TEXT",
+        "ALTER TABLE disks   ADD COLUMN cloud_provider TEXT",
+        "ALTER TABLE disks   ADD COLUMN cloud_root     TEXT",
+    ];
+    for stmt in ADD_COLUMNS {
+        match conn.execute(stmt, []) {
+            Ok(_) => {}
+            // La columna ya existe (catálogo ya migrado): no es un error real.
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                if msg.contains("duplicate column name") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // Índices nuevos. Idempotentes y deben ir DESPUÉS de crear las columnas.
+    // idx_entries_hash sirve también a futuro para duplicados entre discos (mismo hash).
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entries_hash  ON entries(content_hash);
+         CREATE INDEX IF NOT EXISTS idx_entries_place ON entries(gps_place);",
+    )?;
+    Ok(())
 }
 
 /// Extrae la extensión en minúsculas (sin punto) de un nombre de archivo.
@@ -370,6 +477,105 @@ pub fn load_disk_tree(
 /// Ingesta un disco escaneado (sección 7). Si ya existe un disco con el mismo
 /// `volume_uuid`, lo reemplaza (re-escaneo). Mantiene el FTS de forma incremental
 /// (sin reconstruir todo el índice) para no penalizar catálogos grandes.
+/// Enriquecimiento preservado de un escaneo anterior (A2-preserve), keyed por ruta
+/// relativa. El re-escaneo es full-replace (borra + reinserta), así que sin esto un
+/// re-escaneo SIN `enrich` perdería los hashes/GPS ya calculados. Se restaura sólo si
+/// el archivo no cambió (mismo tamaño + mismo mtime), para no arrastrar un hash viejo
+/// de un archivo editado.
+struct PreservedEnrichment {
+    size: i64,
+    modified: Option<i64>,
+    content_hash: Option<String>,
+    hashed_at: Option<i64>,
+    gps_lat: Option<f64>,
+    gps_lon: Option<f64>,
+    gps_place: Option<String>,
+    captured_at: Option<i64>,
+    camera_make: Option<String>,
+    camera_model: Option<String>,
+}
+
+/// Rutas relativas (con `/`) de cada entrada de un `DcmfDisk` (raíz = ""). Asume
+/// padre-antes-que-hijo (garantizado por el formato/escaneo). Mismo criterio que
+/// `collect_subtree_files`, para que las claves matcheen el snapshot del disco viejo.
+fn tree_rel_paths(disk: &DcmfDisk) -> Vec<String> {
+    let mut paths = vec![String::new(); disk.entries.len()];
+    for (i, e) in disk.entries.iter().enumerate() {
+        if e.parent < 0 {
+            continue;
+        }
+        let base = &paths[e.parent as usize];
+        paths[i] = if base.is_empty() {
+            e.name.clone()
+        } else {
+            format!("{base}/{}", e.name)
+        };
+    }
+    paths
+}
+
+/// Snapshot del enriquecimiento (hash/GPS) de los discos viejos `old_ids`, por ruta
+/// relativa, ANTES de borrarlos. Sólo incluye archivos con algo que preservar; si un
+/// disco no tiene ninguna fila enriquecida, ni siquiera recorre su árbol (guard barato).
+fn snapshot_enrichment(
+    conn: &Connection,
+    old_ids: &[i64],
+) -> DbResult<std::collections::HashMap<String, PreservedEnrichment>> {
+    let mut map = std::collections::HashMap::new();
+    for &old in old_ids {
+        // Guard: ¿hay algo enriquecido en este disco? Si no, evitamos la CTE.
+        let has_any: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entries WHERE disk_id = ?1 \
+             AND (content_hash IS NOT NULL OR gps_lat IS NOT NULL OR gps_place IS NOT NULL))",
+            params![old],
+            |r| r.get(0),
+        )?;
+        if !has_any {
+            continue;
+        }
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE sub(id, name, is_folder, size_logical, modified_at, content_hash, hashed_at,
+                                gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, rel) AS (
+               SELECT id, name, is_folder, size_logical, modified_at, content_hash, hashed_at,
+                      gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, ''
+                 FROM entries WHERE disk_id = ?1 AND parent_id IS NULL
+               UNION ALL
+               SELECT e.id, e.name, e.is_folder, e.size_logical, e.modified_at, e.content_hash, e.hashed_at,
+                      e.gps_lat, e.gps_lon, e.gps_place, e.captured_at, e.camera_make, e.camera_model,
+                      CASE WHEN s.rel = '' THEN e.name ELSE s.rel || '/' || e.name END
+                 FROM entries e JOIN sub s ON e.parent_id = s.id
+                WHERE e.disk_id = ?1
+             )
+             SELECT rel, size_logical, modified_at, content_hash, hashed_at,
+                    gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model
+             FROM sub
+             WHERE is_folder = 0 AND (content_hash IS NOT NULL OR gps_lat IS NOT NULL OR gps_place IS NOT NULL)",
+        )?;
+        let rows = stmt.query_map(params![old], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                PreservedEnrichment {
+                    size: r.get(1)?,
+                    modified: r.get(2)?,
+                    content_hash: r.get(3)?,
+                    hashed_at: r.get(4)?,
+                    gps_lat: r.get(5)?,
+                    gps_lon: r.get(6)?,
+                    gps_place: r.get(7)?,
+                    captured_at: r.get(8)?,
+                    camera_make: r.get(9)?,
+                    camera_model: r.get(10)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (rel, pe) = row?;
+            map.insert(rel, pe);
+        }
+    }
+    Ok(map)
+}
+
 pub fn ingest_scanned(
     conn: &mut Connection,
     disk: &DcmfDisk,
@@ -377,6 +583,7 @@ pub fn ingest_scanned(
     kind: &str,
     capacity: Option<i64>,
     mount_path: &str,
+    enrichment: Option<&[EntryEnrichment]>,
 ) -> DbResult<ScanIngest> {
     let (agg_log, agg_phys) = aggregate_sizes(disk);
     let file_count = disk.entries.iter().filter(|e| !e.is_folder).count() as i64;
@@ -403,7 +610,10 @@ pub fn ingest_scanned(
         let ids = stmt.query_map(params![key], |r| r.get::<_, i64>(0))?;
         ids.collect::<Result<_, _>>()?
     };
-    for old in old_ids {
+    // A2-preserve: snapshotear el enriquecimiento (hash/GPS) de los discos viejos
+    // ANTES de borrarlos, para restaurarlo en los archivos que no cambiaron.
+    let preserved = snapshot_enrichment(&tx, &old_ids)?;
+    for &old in &old_ids {
         // Borrado del FTS externo: comando 'delete' fila por fila vía SELECT.
         tx.execute(
             "INSERT INTO entries_fts(entries_fts, rowid, name) \
@@ -444,13 +654,18 @@ pub fn ingest_scanned(
     )?;
     let disk_id = tx.last_insert_rowid();
 
+    // Rutas relativas del árbol nuevo (para casar contra el snapshot del viejo).
+    let new_rels = tree_rel_paths(disk);
+
     let mut base: i64 = -1;
     {
         let mut stmt = tx.prepare(
             "INSERT INTO entries
-             (disk_id, parent_id, name, is_folder, size_logical, size_physical, created_at, modified_at, ext)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (disk_id, parent_id, name, is_folder, size_logical, size_physical, created_at, modified_at, ext,
+              content_hash, hashed_at, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         )?;
+        let now = now_secs();
         for (k, e) in disk.entries.iter().enumerate() {
             let parent_id: Option<i64> = if e.parent >= 0 && base >= 0 {
                 Some(base + e.parent as i64)
@@ -460,6 +675,33 @@ pub fn ingest_scanned(
             let ext = if e.is_folder { None } else { ext_of(&e.name) };
             let created = if e.created == 0 { None } else { Some(e.created) };
             let modified = if e.modified == 0 { None } else { Some(e.modified) };
+            // Enriquecimiento (A2 + A2-preserve): preferir el hash/GPS FRESCO de este
+            // escaneo; si no hay, reutilizar el snapshot del disco viejo SOLO si el
+            // archivo no cambió (mismo tamaño + mismo mtime) — así un re-escaneo sin
+            // `enrich` no pierde los hashes, pero un archivo editado no arrastra el viejo.
+            let fresh = enrichment.and_then(|v| v.get(k));
+            let size_now = agg_log[k] as i64;
+            let snap = if e.is_folder { None } else { preserved.get(&new_rels[k]) };
+            let snap = snap.filter(|s| modified.is_some() && s.modified == modified && s.size == size_now);
+
+            let fresh_hash = fresh.and_then(|x| x.content_hash.clone());
+            let (content_hash, hashed_at): (Option<String>, Option<i64>) = match (&fresh_hash, snap) {
+                (Some(_), _) => (fresh_hash.clone(), Some(now)),
+                (None, Some(s)) => (s.content_hash.clone(), s.hashed_at),
+                (None, None) => (None, None),
+            };
+            let gps_lat = fresh.and_then(|x| x.gps_lat).or_else(|| snap.and_then(|s| s.gps_lat));
+            let gps_lon = fresh.and_then(|x| x.gps_lon).or_else(|| snap.and_then(|s| s.gps_lon));
+            let gps_place = fresh
+                .and_then(|x| x.gps_place.clone())
+                .or_else(|| snap.and_then(|s| s.gps_place.clone()));
+            let captured_at = fresh.and_then(|x| x.captured_at).or_else(|| snap.and_then(|s| s.captured_at));
+            let camera_make = fresh
+                .and_then(|x| x.camera_make.clone())
+                .or_else(|| snap.and_then(|s| s.camera_make.clone()));
+            let camera_model = fresh
+                .and_then(|x| x.camera_model.clone())
+                .or_else(|| snap.and_then(|s| s.camera_model.clone()));
             stmt.execute(params![
                 disk_id,
                 parent_id,
@@ -470,6 +712,14 @@ pub fn ingest_scanned(
                 created,
                 modified,
                 ext,
+                content_hash,
+                hashed_at,
+                gps_lat,
+                gps_lon,
+                gps_place,
+                captured_at,
+                camera_make,
+                camera_model,
             ])?;
             if k == 0 {
                 base = tx.last_insert_rowid();
@@ -1102,6 +1352,220 @@ pub fn search(conn: &Connection, query: &str, limit: i64) -> DbResult<SearchResu
     })
 }
 
+// ---------- Embeddings semánticos (IA Fase 1) ----------
+
+/// Item de búsqueda semántica: un `SearchItem` más el score de similitud coseno.
+/// `frame_ts` = segundo del clip donde mejor matchea (None para imágenes).
+#[derive(Debug, Clone, Serialize)]
+pub struct SemanticItem {
+    #[serde(flatten)]
+    pub item: SearchItem,
+    pub score: f32,
+    pub frame_ts: Option<f64>,
+}
+
+fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    b
+}
+
+fn blob_to_vec(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Inserta un embedding (imagen → `frame_ts = None`; frame de video → `Some(seg)`).
+/// Permite varias filas por entrada (un clip tiene varios frames).
+pub fn store_embedding(
+    conn: &Connection,
+    entry_id: i64,
+    model: &str,
+    frame_ts: Option<f64>,
+    vec: &[f32],
+) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO embeddings (entry_id, model, frame_ts, dim, vec) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![entry_id, model, frame_ts, vec.len() as i64, vec_to_blob(vec)],
+    )?;
+    Ok(())
+}
+
+/// Borra los embeddings de una entrada para un modelo (antes de reindexarla).
+pub fn delete_embeddings_for_entry(conn: &Connection, entry_id: i64, model: &str) -> DbResult<()> {
+    conn.execute(
+        "DELETE FROM embeddings WHERE entry_id = ?1 AND model = ?2",
+        params![entry_id, model],
+    )?;
+    Ok(())
+}
+
+/// Borra TODOS los embeddings de un modelo (reindex completo).
+pub fn clear_embeddings(conn: &Connection, model: &str) -> DbResult<()> {
+    conn.execute("DELETE FROM embeddings WHERE model = ?1", params![model])?;
+    Ok(())
+}
+
+/// Cantidad de ENTRADAS (no filas) con al menos un embedding para el modelo.
+pub fn count_embeddings(conn: &Connection, model: &str) -> DbResult<i64> {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT entry_id) FROM embeddings WHERE model = ?1",
+        params![model],
+        |r| r.get(0),
+    )
+}
+
+/// Candidatos a indexar: entradas con thumbnail cacheado (visuales, embebibles
+/// offline) que todavía NO tienen embedding para este modelo. Devuelve
+/// (entry_id, png_bytes). Si `rebuild`, ignora los ya embebidos.
+pub fn embedding_candidates(
+    conn: &Connection,
+    model: &str,
+    rebuild: bool,
+) -> DbResult<Vec<(i64, Vec<u8>)>> {
+    let sql = if rebuild {
+        "SELECT t.entry_id, t.png FROM thumbnails t \
+         JOIN entries e ON e.id = t.entry_id WHERE e.is_folder = 0"
+            .to_string()
+    } else {
+        "SELECT t.entry_id, t.png FROM thumbnails t \
+         JOIN entries e ON e.id = t.entry_id \
+         WHERE e.is_folder = 0 \
+           AND NOT EXISTS (SELECT 1 FROM embeddings m WHERE m.entry_id = t.entry_id AND m.model = ?1)"
+            .to_string()
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = if rebuild {
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map(params![model], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(rows)
+}
+
+/// Total de candidatos visuales (entradas con thumbnail).
+pub fn count_thumbnailed(conn: &Connection) -> DbResult<i64> {
+    conn.query_row("SELECT COUNT(*) FROM thumbnails", [], |r| r.get(0))
+}
+
+/// Una fila de embedding para rankear en memoria: (entry_id, frame_ts, vector).
+pub type EmbeddingRow = (i64, Option<f64>, Vec<f32>);
+
+/// Carga todos los embeddings del modelo (todas las filas: 1 por imagen, N por clip).
+pub fn load_embeddings(conn: &Connection, model: &str) -> DbResult<Vec<EmbeddingRow>> {
+    let mut stmt =
+        conn.prepare("SELECT entry_id, frame_ts, vec FROM embeddings WHERE model = ?1")?;
+    let rows = stmt
+        .query_map(params![model], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<f64>>(1)?,
+                blob_to_vec(&r.get::<_, Vec<u8>>(2)?),
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Carga los vectores de UNA entrada (1 para imagen, N para clip de video).
+/// Sirve para "buscar similares": el caller promedia + normaliza para tener la
+/// firma del archivo.
+pub fn load_entry_embeddings(
+    conn: &Connection,
+    entry_id: i64,
+    model: &str,
+) -> DbResult<Vec<Vec<f32>>> {
+    let mut stmt =
+        conn.prepare("SELECT vec FROM embeddings WHERE entry_id = ?1 AND model = ?2")?;
+    let rows = stmt
+        .query_map(params![entry_id, model], |r| {
+            Ok(blob_to_vec(&r.get::<_, Vec<u8>>(0)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Entradas de VIDEO de un disco (por extensión) que aún no tienen embedding para
+/// el modelo. Devuelve los ids; el caller resuelve la ruta real y muestrea frames.
+pub fn video_embedding_candidates(
+    conn: &Connection,
+    disk_id: i64,
+    model: &str,
+    exts: &[&str],
+) -> DbResult<Vec<i64>> {
+    if exts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = exts.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    // Excluye clips que ya tienen frames muestreados (frame_ts NOT NULL). Los que
+    // solo tienen el frame único de Fase 1 (ts NULL) SÍ califican para el upgrade.
+    let sql = format!(
+        "SELECT e.id FROM entries e \
+         WHERE e.disk_id = ?1 AND e.is_folder = 0 \
+           AND lower(e.ext) IN ({placeholders}) \
+           AND NOT EXISTS (SELECT 1 FROM embeddings m \
+                           WHERE m.entry_id = e.id AND m.model = ?2 AND m.frame_ts IS NOT NULL)"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    // params: disk_id, model, exts...
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(disk_id), Box::new(model.to_string())];
+    for e in exts {
+        p.push(Box::new(e.to_lowercase()));
+    }
+    let rows = stmt
+        .query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+            r.get::<_, i64>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Construye `SearchItem`s (con disco + ruta) para una lista de ids, preservando
+/// el orden de entrada (el ranking lo decide el caller). Ids inexistentes se omiten.
+pub fn search_items_by_ids(conn: &Connection, ids: &[i64]) -> DbResult<Vec<SearchItem>> {
+    let mut out = Vec::with_capacity(ids.len());
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.disk_id, d.name, e.name, e.is_folder, e.size_logical, e.modified_at \
+         FROM entries e JOIN disks d ON d.id = e.disk_id WHERE e.id = ?1",
+    )?;
+    for &id in ids {
+        let row = stmt
+            .query_map(params![id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)? != 0,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                ))
+            })?
+            .next();
+        if let Some(Ok((id, disk_id, disk_name, name, is_folder, size_logical, modified_at))) = row {
+            let path = entry_path(conn, id)?;
+            out.push(SearchItem {
+                id,
+                disk_id,
+                disk_name,
+                name,
+                is_folder,
+                size_logical,
+                modified_at,
+                path,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Filtros de búsqueda avanzada (M4). Todos opcionales; se combinan con AND.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -1115,6 +1579,7 @@ pub struct SearchFilters {
     pub modified_before: Option<i64>,
     pub kind: Option<String>,       // "file" | "folder"
     pub disk_id: Option<i64>,       // limitar a un disco
+    pub place: Option<String>,      // ubicación (gps_place LIKE), C1
 }
 
 impl SearchFilters {
@@ -1128,6 +1593,7 @@ impl SearchFilters {
             && self.modified_before.is_none()
             && self.kind.is_none()
             && self.disk_id.is_none()
+            && self.place.as_ref().map_or(true, |p| p.trim().is_empty())
     }
 }
 
@@ -1190,6 +1656,11 @@ pub fn search_advanced(conn: &Connection, f: &SearchFilters, limit: i64) -> DbRe
     if let Some(v) = f.disk_id {
         clauses.push("e.disk_id = ?".to_string());
         bind.push(Box::new(v));
+    }
+    if let Some(p) = f.place.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        // Ubicación (C1): coincide con el nombre de lugar resuelto del GPS.
+        clauses.push("e.gps_place LIKE ?".to_string());
+        bind.push(Box::new(format!("%{p}%")));
     }
 
     let from = if fts.is_some() {
@@ -1365,6 +1836,160 @@ pub fn duplicates(conn: &Connection, min_size: i64, limit: i64) -> DbResult<Vec<
     Ok(out)
 }
 
+// ─────────────────────────── Auditoría de backup (B1) ───────────────────────────
+//
+// Compara dos subárboles del catálogo (source vs destination) y reporta qué archivos
+// del source faltan / difieren / no se pueden verificar en el destino. OFFLINE: opera
+// sobre el catálogo, no necesita los discos montados. La identidad de "mismo archivo"
+// es la RUTA RELATIVA al root elegido; la verificación de contenido usa el hash BLAKE3
+// (poblado por el escaneo enriquecido, A2). Sin hash → se cae a comparación por tamaño.
+
+/// Referencia a un archivo del source para mostrar/accionar en el reporte.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileRef {
+    pub entry_id: i64,
+    pub rel_path: String,
+    pub name: String,
+    pub size: i64,
+}
+
+/// Resultado de comparar un subárbol source contra uno destination.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupReport {
+    /// Archivos del source presentes en dest y verificados por hash idéntico.
+    pub ok: u64,
+    /// Archivos del source que NO existen en dest (mismo rel_path no encontrado).
+    pub missing: Vec<FileRef>,
+    /// Existen en dest con el mismo rel_path pero contenido distinto (hash difiere)
+    /// o tamaño distinto sin hash → copia parcial/corrupta/versión vieja.
+    pub mismatch: Vec<FileRef>,
+    /// Existen en dest con el mismo rel_path y tamaño, pero falta hash de algún lado
+    /// → presentes pero NO verificados por contenido.
+    pub unverified: Vec<FileRef>,
+    /// Cantidad de archivos en dest que no están en source (informativo).
+    pub extra: u64,
+    /// Bytes lógicos de los archivos faltantes (para estimar la copia).
+    pub missing_bytes: i64,
+    /// Total de archivos del source comparados.
+    pub source_total: u64,
+    /// true si no falta nada y nada difiere (lo `unverified` no bloquea, pero la UI lo muestra).
+    pub fully_backed_up: bool,
+}
+
+/// Archivo de un subárbol con su ruta relativa al root elegido.
+struct SubtreeFile {
+    entry_id: i64,
+    rel_path: String,
+    name: String,
+    size: i64,
+    hash: Option<String>,
+}
+
+/// Entrada raíz (volumen) de un disco: la fila sin padre.
+pub fn disk_root_entry(conn: &Connection, disk_id: i64) -> DbResult<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM entries WHERE disk_id = ?1 AND parent_id IS NULL",
+        params![disk_id],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Todos los ARCHIVOS (no carpetas) descendientes de `root_entry`, con su ruta
+/// relativa al root (el root queda como ""). Descenso por CTE recursiva usando el
+/// índice (disk_id, parent_id).
+fn collect_subtree_files(conn: &Connection, root_entry: i64) -> DbResult<Vec<SubtreeFile>> {
+    let disk_id: i64 =
+        conn.query_row("SELECT disk_id FROM entries WHERE id = ?1", params![root_entry], |r| r.get(0))?;
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE sub(id, name, is_folder, size_logical, content_hash, rel) AS (
+           SELECT id, name, is_folder, size_logical, content_hash, ''
+             FROM entries WHERE id = ?1
+           UNION ALL
+           SELECT e.id, e.name, e.is_folder, e.size_logical, e.content_hash,
+                  CASE WHEN s.rel = '' THEN e.name ELSE s.rel || '/' || e.name END
+             FROM entries e JOIN sub s ON e.parent_id = s.id
+            WHERE e.disk_id = ?2
+         )
+         SELECT id, rel, name, size_logical, content_hash FROM sub WHERE is_folder = 0",
+    )?;
+    let rows = stmt.query_map(params![root_entry, disk_id], |r| {
+        Ok(SubtreeFile {
+            entry_id: r.get(0)?,
+            rel_path: r.get(1)?,
+            name: r.get(2)?,
+            size: r.get(3)?,
+            hash: r.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Compara el subárbol `source_root` contra `dest_root` (ids de entrada raíz).
+/// Nota de rendimiento: carga ambos subárboles en memoria (HashMap por rel_path).
+/// Apto para comparar carpetas de proyecto / tarjetas; para discos enteros de
+/// millones de archivos puede ser pesado (aceptable para B1).
+pub fn compare_subtrees(conn: &Connection, source_root: i64, dest_root: i64) -> DbResult<BackupReport> {
+    use std::collections::{HashMap, HashSet};
+
+    let src = collect_subtree_files(conn, source_root)?;
+    let dst = collect_subtree_files(conn, dest_root)?;
+
+    let to_ref = |f: &SubtreeFile| FileRef {
+        entry_id: f.entry_id,
+        rel_path: f.rel_path.clone(),
+        name: f.name.clone(),
+        size: f.size,
+    };
+
+    let mut dest_by_rel: HashMap<&str, &SubtreeFile> = HashMap::with_capacity(dst.len());
+    for d in &dst {
+        dest_by_rel.insert(d.rel_path.as_str(), d);
+    }
+    let src_rels: HashSet<&str> = src.iter().map(|f| f.rel_path.as_str()).collect();
+
+    let mut ok: u64 = 0;
+    let mut missing: Vec<FileRef> = Vec::new();
+    let mut mismatch: Vec<FileRef> = Vec::new();
+    let mut unverified: Vec<FileRef> = Vec::new();
+    let mut missing_bytes: i64 = 0;
+
+    for f in &src {
+        match dest_by_rel.get(f.rel_path.as_str()) {
+            None => {
+                missing_bytes += f.size.max(0);
+                missing.push(to_ref(f));
+            }
+            Some(d) => match (f.hash.as_deref(), d.hash.as_deref()) {
+                (Some(a), Some(b)) if a == b => ok += 1,
+                (Some(_), Some(_)) => mismatch.push(to_ref(f)), // hashes difieren
+                _ => {
+                    // Falta hash de algún lado: no verificable por contenido.
+                    if f.size == d.size {
+                        unverified.push(to_ref(f)); // mismo tamaño, sin verificar
+                    } else {
+                        mismatch.push(to_ref(f)); // tamaño distinto → copia parcial/distinta
+                    }
+                }
+            },
+        }
+    }
+
+    let extra = dst.iter().filter(|d| !src_rels.contains(d.rel_path.as_str())).count() as u64;
+    let fully_backed_up = missing.is_empty() && mismatch.is_empty();
+
+    Ok(BackupReport {
+        ok,
+        missing,
+        mismatch,
+        unverified,
+        extra,
+        missing_bytes,
+        source_total: src.len() as u64,
+        fully_backed_up,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1532,7 +2157,7 @@ mod tests {
     #[test]
     fn scan_ingest_sets_online_and_fingerprint() {
         let mut conn = open_in_memory().unwrap();
-        let r = ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", Some(1000), "/Volumes/SF28").unwrap();
+        let r = ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", Some(1000), "/Volumes/SF28", None).unwrap();
         assert!(!r.replaced);
         let (online, uuid, mount): (i64, String, String) = conn
             .query_row(
@@ -1713,6 +2338,57 @@ mod tests {
     }
 
     #[test]
+    fn embeddings_store_candidates_load_and_items() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk()]).unwrap();
+        // Dos archivos con thumbnail cacheado (candidatos visuales).
+        conn.execute(
+            "INSERT INTO entries (disk_id, parent_id, name, is_folder, ext) \
+             VALUES ((SELECT id FROM disks LIMIT 1), NULL, 'a.jpg', 0, 'jpg'), \
+                    ((SELECT id FROM disks LIMIT 1), NULL, 'b.png', 0, 'png')",
+            [],
+        )
+        .unwrap();
+        let a: i64 = conn.query_row("SELECT id FROM entries WHERE name='a.jpg'", [], |r| r.get(0)).unwrap();
+        let b: i64 = conn.query_row("SELECT id FROM entries WHERE name='b.png'", [], |r| r.get(0)).unwrap();
+        store_thumbnail(&conn, a, &[1, 2, 3], 4, 4).unwrap();
+        store_thumbnail(&conn, b, &[4, 5, 6], 4, 4).unwrap();
+
+        let model = "test-model";
+        // Antes de embeber: 2 candidatos, 0 embeddings.
+        assert_eq!(count_thumbnailed(&conn).unwrap(), 2);
+        assert_eq!(count_embeddings(&conn, model).unwrap(), 0);
+        assert_eq!(embedding_candidates(&conn, model, false).unwrap().len(), 2);
+
+        // Embeber 'a' (imagen → frame_ts None).
+        store_embedding(&conn, a, model, None, &[1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(count_embeddings(&conn, model).unwrap(), 1);
+        // Solo 'b' queda pendiente (a menos que rebuild).
+        let pend = embedding_candidates(&conn, model, false).unwrap();
+        assert_eq!(pend.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![b]);
+        assert_eq!(embedding_candidates(&conn, model, true).unwrap().len(), 2);
+
+        // 'b' como "video": dos frames con timestamp → cuenta como 1 entrada.
+        store_embedding(&conn, b, model, Some(1.0), &[0.0, 1.0, 0.0]).unwrap();
+        store_embedding(&conn, b, model, Some(2.0), &[0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(count_embeddings(&conn, model).unwrap(), 2);
+        let loaded = load_embeddings(&conn, model).unwrap();
+        assert_eq!(loaded.len(), 3); // 1 (a) + 2 frames (b)
+        let va = loaded.iter().find(|(id, ts, _)| *id == a && ts.is_none()).unwrap().2.clone();
+        assert_eq!(va, vec![1.0, 0.0, 0.0]);
+
+        // delete_embeddings_for_entry borra solo las filas de esa entrada.
+        delete_embeddings_for_entry(&conn, b, model).unwrap();
+        assert_eq!(count_embeddings(&conn, model).unwrap(), 1);
+
+        // search_items_by_ids preserva el orden pedido y trae disco + ruta.
+        let items = search_items_by_ids(&conn, &[b, a]).unwrap();
+        assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![b, a]);
+        assert_eq!(items[0].name, "b.png");
+        assert!(!items[0].disk_name.is_empty());
+    }
+
+    #[test]
     fn video_meta_store_get_and_pending() {
         let mut conn = open_in_memory().unwrap();
         ingest_disks(&mut conn, &[sample_disk()]).unwrap();
@@ -1828,13 +2504,13 @@ mod tests {
     #[test]
     fn rescan_clears_thumbnails_and_tags() {
         let mut conn = open_in_memory().unwrap();
-        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28").unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28", None).unwrap();
         let id: i64 = conn.query_row("SELECT id FROM entries WHERE name='C0001.MP4'", [], |r| r.get(0)).unwrap();
         add_entry_tag(&conn, id, "boda").unwrap();
         store_thumbnail(&conn, id, &[9, 9, 9], 10, 10).unwrap();
 
         // Re-escaneo del mismo fingerprint: limpia thumbnails y vínculos huérfanos.
-        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28").unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28", None).unwrap();
         let thumbs: i64 = conn.query_row("SELECT COUNT(*) FROM thumbnails", [], |r| r.get(0)).unwrap();
         let links: i64 = conn.query_row("SELECT COUNT(*) FROM entry_tags", [], |r| r.get(0)).unwrap();
         assert_eq!(thumbs, 0);
@@ -1852,9 +2528,9 @@ mod tests {
     #[test]
     fn rescan_replaces_same_fingerprint() {
         let mut conn = open_in_memory().unwrap();
-        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28").unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28", None).unwrap();
         // Segundo escaneo del mismo disco (mismo UUID) no debe duplicar.
-        let r2 = ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28").unwrap();
+        let r2 = ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28", None).unwrap();
         assert!(r2.replaced);
         let disk_count: i64 = conn.query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0)).unwrap();
         assert_eq!(disk_count, 1);
@@ -1868,8 +2544,8 @@ mod tests {
         // Discos exFAT/NTFS sin Volume UUID: el re-escaneo debe reemplazar por
         // nombre (entre los discos sin fingerprint), no acumular duplicados.
         let mut conn = open_in_memory().unwrap();
-        ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41").unwrap();
-        let r2 = ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41").unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41", None).unwrap();
+        let r2 = ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41", None).unwrap();
         assert!(r2.replaced);
         let same_name: i64 = conn
             .query_row("SELECT COUNT(*) FROM disks WHERE name = ?1", params![sample_disk().name], |r| r.get(0))
@@ -1877,9 +2553,207 @@ mod tests {
         assert_eq!(same_name, 1);
         // Un disco con fingerprint y mismo nombre no debe ser tocado por el
         // re-escaneo sin fingerprint (identidad por UUID tiene prioridad).
-        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-X"), "ssd", None, "/Volumes/SF41").unwrap();
-        ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41").unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-X"), "ssd", None, "/Volumes/SF41", None).unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41", None).unwrap();
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0)).unwrap();
         assert_eq!(total, 2); // uno con UUID-X + uno sin fingerprint
+    }
+
+    #[test]
+    fn migrations_add_columns_and_are_idempotent() {
+        // Simula un catálogo "viejo": tablas mínimas sin las columnas nuevas,
+        // tal como las crearía una versión anterior de la app.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE disks (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE entries (id INTEGER PRIMARY KEY, disk_id INTEGER NOT NULL,
+                                   name TEXT NOT NULL, is_folder INTEGER NOT NULL);",
+        )
+        .unwrap();
+
+        // Primera migración: agrega todas las columnas + índices.
+        apply_migrations(&conn).unwrap();
+        // Segunda corrida sobre el MISMO catálogo: no debe fallar (idempotente).
+        apply_migrations(&conn).unwrap();
+
+        // Verifica que las columnas nuevas existan en entries.
+        let entry_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('entries')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for c in [
+            "content_hash", "hashed_at", "cloud_state", "gps_lat", "gps_lon", "gps_place",
+            "captured_at", "camera_make", "camera_model",
+        ] {
+            assert!(entry_cols.contains(&c.to_string()), "falta columna entries.{c}");
+        }
+
+        // Y en disks.
+        let disk_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('disks')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(disk_cols.contains(&"cloud_provider".to_string()));
+        assert!(disk_cols.contains(&"cloud_root".to_string()));
+
+        // Índices creados.
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                 AND name IN ('idx_entries_hash','idx_entries_place')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 2);
+    }
+
+    #[test]
+    fn ingest_persists_enrichment_hashes() {
+        let mut conn = open_in_memory().unwrap();
+        let disk = sample_disk();
+        // Enriquecimiento alineado por índice: hash sólo para el archivo C0001.MP4 (índice 2).
+        let mut enr = vec![EntryEnrichment::default(); disk.entries.len()];
+        enr[2].content_hash = Some("deadbeef".into());
+        enr[2].gps_place = Some("Jujuy, Argentina".into());
+        ingest_scanned(&mut conn, &disk, Some("UUID-1"), "ssd", None, "/Volumes/SF28", Some(&enr))
+            .unwrap();
+
+        let (hash, place, hashed_at): (Option<String>, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT content_hash, gps_place, hashed_at FROM entries WHERE name = 'C0001.MP4'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(hash.as_deref(), Some("deadbeef"));
+        assert_eq!(place.as_deref(), Some("Jujuy, Argentina"));
+        assert!(hashed_at.is_some(), "hashed_at se setea cuando hay hash");
+
+        // Una entrada sin enriquecimiento queda con hash NULL (no rompe).
+        let other: Option<String> = conn
+            .query_row("SELECT content_hash FROM entries WHERE name = 'B-ROLL.MOV'", [], |r| r.get(0))
+            .unwrap();
+        assert!(other.is_none());
+
+        // Sin enrichment (None) tampoco rompe y deja todo NULL.
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-2"), "ssd", None, "/Volumes/SF99", None)
+            .unwrap();
+    }
+
+    #[test]
+    fn compare_subtrees_classifies_files() {
+        let mut conn = open_in_memory().unwrap();
+        let folder = |name: &str, parent: i32| DcmfEntry {
+            name: name.into(), parent, is_folder: true, is_volume: parent < 0,
+            size_logical: 0, size_physical: 0, created: 0, modified: 0,
+        };
+        let file = |name: &str, parent: i32, size: u64| DcmfEntry {
+            name: name.into(), parent, is_folder: false, is_volume: false,
+            size_logical: size, size_physical: size, created: 0, modified: 0,
+        };
+
+        // SOURCE: DCIM/{A.mov(hashA), B.mov(hashB), C.mov(sin hash, 50B)}
+        let src = DcmfDisk {
+            name: "SRC".into(),
+            entries: vec![
+                folder("SRC", -1), folder("DCIM", 0),
+                file("A.mov", 1, 100), file("B.mov", 1, 200), file("C.mov", 1, 50),
+            ],
+        };
+        let mut src_enr = vec![EntryEnrichment::default(); src.entries.len()];
+        src_enr[2].content_hash = Some("hashA".into());
+        src_enr[3].content_hash = Some("hashB".into());
+        // C.mov queda sin hash a propósito.
+        ingest_scanned(&mut conn, &src, Some("U-SRC"), "ssd", None, "/Volumes/SRC", Some(&src_enr)).unwrap();
+
+        // DEST: DCIM/{A.mov(hash distinto → mismatch), C.mov(sin hash, mismo 50B → unverified)}
+        //       B.mov ausente → missing.
+        let dst = DcmfDisk {
+            name: "DST".into(),
+            entries: vec![
+                folder("DST", -1), folder("DCIM", 0),
+                file("A.mov", 1, 100), file("C.mov", 1, 50),
+            ],
+        };
+        let mut dst_enr = vec![EntryEnrichment::default(); dst.entries.len()];
+        dst_enr[2].content_hash = Some("hashA-DISTINTO".into());
+        ingest_scanned(&mut conn, &dst, Some("U-DST"), "ssd", None, "/Volumes/DST", Some(&dst_enr)).unwrap();
+
+        let src_disk: i64 = conn.query_row("SELECT id FROM disks WHERE name='SRC'", [], |r| r.get(0)).unwrap();
+        let dst_disk: i64 = conn.query_row("SELECT id FROM disks WHERE name='DST'", [], |r| r.get(0)).unwrap();
+        let src_root = disk_root_entry(&conn, src_disk).unwrap().unwrap();
+        let dst_root = disk_root_entry(&conn, dst_disk).unwrap().unwrap();
+
+        let rep = compare_subtrees(&conn, src_root, dst_root).unwrap();
+        assert_eq!(rep.source_total, 3);
+        assert_eq!(rep.ok, 0);
+        assert_eq!(rep.missing.len(), 1, "B.mov falta");
+        assert_eq!(rep.missing[0].name, "B.mov");
+        assert_eq!(rep.missing[0].rel_path, "DCIM/B.mov");
+        assert_eq!(rep.missing_bytes, 200);
+        assert_eq!(rep.mismatch.len(), 1, "A.mov difiere por hash");
+        assert_eq!(rep.mismatch[0].name, "A.mov");
+        assert_eq!(rep.unverified.len(), 1, "C.mov presente, mismo tamaño, sin hash");
+        assert_eq!(rep.unverified[0].name, "C.mov");
+        assert_eq!(rep.extra, 0);
+        assert!(!rep.fully_backed_up);
+
+        // Comparar el source contra sí mismo → A y B verificados (OK), C sin hash queda unverified.
+        let same = compare_subtrees(&conn, src_root, src_root).unwrap();
+        assert_eq!(same.ok, 2);
+        assert_eq!(same.unverified.len(), 1);
+        assert!(same.missing.is_empty() && same.mismatch.is_empty());
+        assert!(same.fully_backed_up);
+    }
+
+    #[test]
+    fn rescan_preserves_hash_when_unchanged() {
+        let mut conn = open_in_memory().unwrap();
+        let disk = sample_disk(); // C0001.MP4 tiene size + mtime reales (índice 2)
+        let mut enr = vec![EntryEnrichment::default(); disk.entries.len()];
+        enr[2].content_hash = Some("HASH-C0001".into());
+        ingest_scanned(&mut conn, &disk, Some("UUID-1"), "ssd", None, "/Volumes/SF28", Some(&enr)).unwrap();
+
+        // Re-escaneo SIN enrich (None): el hash debe PRESERVARSE (archivo sin cambios).
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-1"), "ssd", None, "/Volumes/SF28", None).unwrap();
+        let h: Option<String> = conn
+            .query_row("SELECT content_hash FROM entries WHERE name='C0001.MP4'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(h.as_deref(), Some("HASH-C0001"), "el hash debe sobrevivir a un re-escaneo sin enrich");
+
+        // Re-escaneo con el MISMO archivo pero distinto TAMAÑO → NO se preserva (cambió).
+        let mut changed = sample_disk();
+        changed.entries[2].size_logical = 999;
+        ingest_scanned(&mut conn, &changed, Some("UUID-1"), "ssd", None, "/Volumes/SF28", None).unwrap();
+        let h2: Option<String> = conn
+            .query_row("SELECT content_hash FROM entries WHERE name='C0001.MP4'", [], |r| r.get(0))
+            .unwrap();
+        assert!(h2.is_none(), "un cambio de tamaño debe descartar el hash viejo");
+    }
+
+    #[test]
+    fn search_by_place_filters_on_gps_place() {
+        let mut conn = open_in_memory().unwrap();
+        let disk = sample_disk(); // C0001.MP4 (idx 2), B-ROLL.MOV (idx 3)
+        let mut enr = vec![EntryEnrichment::default(); disk.entries.len()];
+        enr[2].gps_place = Some("San Salvador de Jujuy, Jujuy, AR".into());
+        enr[3].gps_place = Some("Buenos Aires, Buenos Aires F.D., AR".into());
+        ingest_scanned(&mut conn, &disk, Some("U"), "ssd", None, "/Volumes/SF28", Some(&enr)).unwrap();
+
+        let f = SearchFilters { place: Some("Jujuy".into()), ..Default::default() };
+        let res = search_advanced(&conn, &f, 50).unwrap();
+        assert_eq!(res.total, 1);
+        assert_eq!(res.items[0].name, "C0001.MP4");
+
+        // Combinado con un filtro de tipo: sigue matcheando.
+        let f2 = SearchFilters { place: Some("AR".into()), kind: Some("file".into()), ..Default::default() };
+        assert_eq!(search_advanced(&conn, &f2, 50).unwrap().total, 2);
     }
 }

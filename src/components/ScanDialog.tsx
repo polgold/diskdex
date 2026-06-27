@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { HardDrive, Usb, Loader2, X, RefreshCw, FolderPlus, Network, Image as ImageIcon, Film, Package, Ban } from "lucide-react";
+import { HardDrive, Usb, Loader2, X, RefreshCw, FolderPlus, Network, Image as ImageIcon, Film, Package, Ban, Fingerprint } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, type VolumeInfo, type ScanProgress, type DiskRow } from "../lib/ipc";
 import { formatBytes, formatCount } from "../lib/format";
@@ -24,6 +24,8 @@ export interface PostScanOptions {
   archives: boolean;
   /** Saltar basura (node_modules, caches, papeleras…) durante el recorrido. OPT-IN. */
   excludeJunk: boolean;
+  /** Escaneo enriquecido: hash BLAKE3 por archivo (para auditoría de backup). OPT-IN, lento. */
+  enrich: boolean;
 }
 
 interface Props {
@@ -225,6 +227,12 @@ export function ScanDialog({ onClose, onScan, scanning, options, setOptions }: P
             label={t("scandlg.excludeJunk")}
             on={options.excludeJunk}
             onClick={() => setOptions({ ...options, excludeJunk: !options.excludeJunk })}
+          />
+          <OptToggle
+            icon={<Fingerprint className="h-3.5 w-3.5" />}
+            label={t("scandlg.enrich")}
+            on={options.enrich}
+            onClick={() => setOptions({ ...options, enrich: !options.enrich })}
           />
         </div>
 

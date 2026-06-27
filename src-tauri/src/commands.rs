@@ -111,6 +111,32 @@ pub fn cancel_scan(mount_path: String) {
     }
 }
 
+/// Cancelaciones de copia de backup en curso, keyed por disco destino (string).
+/// Igual patrón que SCAN_CANCELS pero para `copy_missing` (B2).
+static COPY_CANCELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn copy_cancel_requested(key: &str) -> bool {
+    COPY_CANCELS.lock().map(|v| v.iter().any(|m| m == key)).unwrap_or(false)
+}
+
+fn clear_copy_cancel(key: &str) {
+    if let Ok(mut v) = COPY_CANCELS.lock() {
+        v.retain(|m| m != key);
+    }
+}
+
+/// Pide cancelar la copia de backup en curso hacia `dest_disk_id`. La copia se
+/// detiene en el próximo archivo (no interrumpe un archivo a medio copiar).
+#[tauri::command(async)]
+pub fn cancel_copy(dest_disk_id: i64) {
+    if let Ok(mut v) = COPY_CANCELS.lock() {
+        let key = dest_disk_id.to_string();
+        if !v.iter().any(|m| m == &key) {
+            v.push(key);
+        }
+    }
+}
+
 /// M0: sanity check de la IPC.
 #[tauri::command(async)]
 pub fn ping() -> String {
@@ -427,6 +453,185 @@ pub fn get_entry(
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
     db::get_entry(&cat.conn, entry_id).map_err(|e| e.to_string())
+}
+
+/// B1 — Auditoría de backup: compara dos subárboles del catálogo (source vs dest)
+/// y reporta qué archivos del source faltan / difieren / no se verifican en dest.
+/// `*_entry_id` opcional: si falta, se usa la raíz del disco (comparación de disco
+/// entero); si está, se compara desde esa carpeta (alineá los roots para que matcheen
+/// las rutas relativas). OFFLINE: no requiere los discos montados. Args en una sola
+/// struct para evitar el edge de Tauri con multi-arg + State.
+#[derive(serde::Deserialize)]
+pub struct CompareArgs {
+    pub source_disk_id: i64,
+    pub source_entry_id: Option<i64>,
+    pub dest_disk_id: i64,
+    pub dest_entry_id: Option<i64>,
+}
+
+/// A2-meta: metadata enriquecida de una entrada (hash + GPS/cámara/captura) para el inspector.
+#[tauri::command(async)]
+pub fn get_entry_meta(
+    state: tauri::State<'_, AppState>,
+    entry_id: i64,
+) -> Result<db::EntryMeta, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    db::get_entry_meta(&cat.conn, entry_id).map_err(|e| e.to_string())
+}
+
+/// Resuelve la entrada raíz a comparar: la dada explícitamente, o la raíz del disco.
+fn resolve_root(conn: &Connection, disk_id: i64, entry: Option<i64>) -> Result<i64, String> {
+    match entry {
+        Some(e) => Ok(e),
+        None => db::disk_root_entry(conn, disk_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("el disco {disk_id} no tiene entradas catalogadas")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn compare_backup(
+    state: tauri::State<'_, AppState>,
+    args: CompareArgs,
+) -> Result<db::BackupReport, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    let src = resolve_root(&cat.conn, args.source_disk_id, args.source_entry_id)?;
+    let dst = resolve_root(&cat.conn, args.dest_disk_id, args.dest_entry_id)?;
+    db::compare_subtrees(&cat.conn, src, dst).map_err(|e| e.to_string())
+}
+
+/// B2 — Copiar lo que falta: copia al destino los archivos del origen ausentes
+/// (según `compare_subtrees`). Primera operación que ESCRIBE en un disco externo,
+/// con máximo cuidado: requiere ambos discos montados, NO sobreescribe nada, copia
+/// de forma atómica (temporal + rename) y VERIFICA cada archivo por hash tras copiar.
+/// `dry_run` devuelve solo el plan (cantidad + bytes + muestra) sin escribir nada.
+#[derive(serde::Deserialize)]
+pub struct CopyMissingArgs {
+    pub source_disk_id: i64,
+    pub source_entry_id: Option<i64>,
+    pub dest_disk_id: i64,
+    pub dest_entry_id: Option<i64>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct CopyFailure {
+    pub rel_path: String,
+    pub error: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct CopyResult {
+    pub dry_run: bool,
+    pub planned: u64,
+    pub planned_bytes: i64,
+    pub copied: u64,
+    pub copied_bytes: i64,
+    pub verified: u64,
+    pub skipped: u64,
+    pub cancelled: bool,
+    pub failed: Vec<CopyFailure>,
+    pub sample: Vec<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct CopyProgress {
+    count: u64,
+    total: u64,
+    copied: u64,
+    bytes: i64,
+}
+
+#[tauri::command(async)]
+pub fn copy_missing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    args: CopyMissingArgs,
+) -> Result<CopyResult, String> {
+    // 1) Resolver rutas reales (requiere discos montados) + lista de faltantes,
+    //    dentro de un lock corto del catálogo; luego se libera para copiar sin
+    //    bloquear la UI.
+    let (src_root_real, dst_root_real, missing) = {
+        let guard = state.catalog.lock().unwrap();
+        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+        let src_root = resolve_root(&cat.conn, args.source_disk_id, args.source_entry_id)?;
+        let dst_root = resolve_root(&cat.conn, args.dest_disk_id, args.dest_entry_id)?;
+        let src_real = resolve_real_path(&cat.conn, src_root)?;
+        let dst_real = resolve_real_path(&cat.conn, dst_root)?;
+        let report = db::compare_subtrees(&cat.conn, src_root, dst_root).map_err(|e| e.to_string())?;
+        (src_real, dst_real, report.missing)
+    };
+
+    let planned = missing.len() as u64;
+    let planned_bytes: i64 = missing.iter().map(|f| f.size.max(0)).sum();
+    let sample: Vec<String> = missing.iter().take(50).map(|f| f.rel_path.clone()).collect();
+
+    if args.dry_run {
+        return Ok(CopyResult {
+            dry_run: true,
+            planned,
+            planned_bytes,
+            copied: 0,
+            copied_bytes: 0,
+            verified: 0,
+            skipped: 0,
+            cancelled: false,
+            failed: Vec::new(),
+            sample,
+        });
+    }
+
+    // 2) Copia real (sin el lock del catálogo).
+    let cancel_key = args.dest_disk_id.to_string();
+    clear_copy_cancel(&cancel_key);
+    let mut copied = 0u64;
+    let mut copied_bytes = 0i64;
+    let mut verified = 0u64;
+    let mut skipped = 0u64;
+    let mut failed: Vec<CopyFailure> = Vec::new();
+    let mut cancelled = false;
+
+    for (i, f) in missing.iter().enumerate() {
+        if copy_cancel_requested(&cancel_key) {
+            cancelled = true;
+            break;
+        }
+        let src = src_root_real.join(&f.rel_path);
+        let dst = dst_root_real.join(&f.rel_path);
+        // Nunca sobreescribir: si el destino ya existe, lo salteamos.
+        if dst.exists() {
+            skipped += 1;
+            continue;
+        }
+        match scan::copy_file_verified(&src, &dst) {
+            Ok(bytes) => {
+                copied += 1;
+                verified += 1;
+                copied_bytes += bytes as i64;
+            }
+            Err(e) => failed.push(CopyFailure { rel_path: f.rel_path.clone(), error: e.to_string() }),
+        }
+        let _ = app.emit(
+            "copy-progress",
+            CopyProgress { count: (i + 1) as u64, total: planned, copied, bytes: copied_bytes },
+        );
+    }
+    clear_copy_cancel(&cancel_key);
+
+    Ok(CopyResult {
+        dry_run: false,
+        planned,
+        planned_bytes,
+        copied,
+        copied_bytes,
+        verified,
+        skipped,
+        cancelled,
+        failed,
+        sample,
+    })
 }
 
 /// M7: edita el comentario de una entrada.
@@ -1281,6 +1486,39 @@ fn scan_disk_blocking(
         }
     };
     clear_cancel(&mount_path);
+
+    // Enriquecimiento opcional (opt-in): hash BLAKE3 (+ a futuro GPS/cámara) por
+    // archivo. Lee TODO el contenido del disco → puede tardar; emite su propia fase
+    // de progreso (pct = -3 → la UI muestra "Calculando hashes…") y respeta la
+    // cancelación con el mismo mecanismo que el recorrido.
+    let enrichment: Option<Vec<scan::EntryEnrichment>> = if opts.enrich {
+        let app2 = app.clone();
+        let mp = mount_path.clone();
+        let cancel_mp = mount_path.clone();
+        let mut on_hash = |count: u64, _bytes: u64| {
+            let _ = app2.emit(
+                "scan-progress",
+                ScanProgress { mount: mp.clone(), count, pct: -3 },
+            );
+        };
+        let cancel = || cancel_requested(&cancel_mp);
+        match scan::enrich_entries(&root, &disk, &mut on_hash, &cancel) {
+            Ok(v) => Some(v),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                clear_cancel(&mount_path);
+                let _ = app.emit(
+                    "scan-progress",
+                    ScanProgress { mount: mount_path.clone(), count: 0, pct: 100 },
+                );
+                return Err("escaneo cancelado".into());
+            }
+            Err(e) => return Err(format!("error calculando hashes: {e}")),
+        }
+    } else {
+        None
+    };
+    clear_cancel(&mount_path);
+
     // Fin del recorrido → fase de GUARDADO (pct = -2). Ingestar millones de filas
     // tarda y no emite progreso; este sentinel hace que la UI muestre "Guardando…"
     // en vez de un "Scanning" congelado que parece colgado.
@@ -1301,6 +1539,7 @@ fn scan_disk_blocking(
         &kind,
         capacity,
         &mount_path,
+        enrichment.as_deref(),
     )
     .map_err(|e| format!("error guardando el escaneo: {e}"))?;
 
@@ -1497,4 +1736,532 @@ pub fn disk_detail(state: tauri::State<'_, AppState>, disk_id: i64) -> Result<Di
         live_total,
         live_free,
     })
+}
+
+// ============================================================================
+// IA — búsqueda semántica de imágenes (Fase 1). Gateada por la feature `ai`:
+// cuando NO está compilada, los comandos existen igual pero responden
+// "no disponible" para que la UI esconda lo de IA sin romper.
+// ============================================================================
+
+/// Id del modelo (debe coincidir con `ai::MODEL_REPO`). Para `not(ai)` es solo
+/// un literal informativo en el status.
+#[cfg(feature = "ai")]
+const AI_MODEL: &str = crate::ai::MODEL_REPO;
+#[cfg(not(feature = "ai"))]
+const AI_MODEL: &str = "google/siglip2-base-patch16-256";
+
+#[cfg(feature = "ai")]
+fn ai_model_loaded() -> bool {
+    crate::ai::is_loaded()
+}
+#[cfg(not(feature = "ai"))]
+fn ai_model_loaded() -> bool {
+    false
+}
+
+#[derive(Serialize)]
+pub struct AiStatus {
+    /// Compilada con la feature `ai`.
+    pub available: bool,
+    /// Modelo ya cargado en memoria (no fuerza la carga).
+    pub loaded: bool,
+    pub model: String,
+    /// Entradas con embedding para este modelo.
+    pub embedded: i64,
+    /// Entradas visuales candidatas (con thumbnail cacheado).
+    pub candidates: i64,
+}
+
+/// ¿Está compilada la IA? La UI lo usa para mostrar/ocultar la búsqueda semántica.
+#[tauri::command(async)]
+pub fn ai_available() -> bool {
+    cfg!(feature = "ai")
+}
+
+/// Estado del índice semántico del catálogo abierto.
+#[tauri::command(async)]
+pub fn ai_status(state: tauri::State<'_, AppState>) -> Result<AiStatus, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    let model = AI_MODEL.to_string();
+    let embedded = db::count_embeddings(&cat.conn, &model).map_err(|e| e.to_string())?;
+    let candidates = db::count_thumbnailed(&cat.conn).map_err(|e| e.to_string())?;
+    Ok(AiStatus {
+        available: cfg!(feature = "ai"),
+        loaded: ai_model_loaded(),
+        model,
+        embedded,
+        candidates,
+    })
+}
+
+/// Indexa (embebe) las imágenes con thumbnail cacheado que aún no tienen vector.
+/// Emite `ai://index` `{done, total}`. Con `rebuild=true` reembebe todo.
+#[cfg(feature = "ai")]
+#[tauri::command(async)]
+pub async fn ai_index(app: tauri::AppHandle, rebuild: Option<bool>) -> Result<i64, String> {
+    let rebuild = rebuild.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || ai_index_blocking(app, rebuild))
+        .await
+        .map_err(|e| format!("error en la tarea de indexado IA: {e}"))?
+}
+
+#[cfg(feature = "ai")]
+fn ai_index_blocking(app: tauri::AppHandle, rebuild: bool) -> Result<i64, String> {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let path = {
+        let guard = state.catalog.lock().unwrap();
+        guard
+            .as_ref()
+            .ok_or("no hay catálogo abierto")?
+            .path
+            .clone()
+    };
+    let model = crate::ai::MODEL_REPO.to_string();
+
+    // Carga/descarga del modelo (puede tardar la 1ª vez).
+    let _ = app.emit(
+        "ai://index",
+        serde_json::json!({"done": 0, "total": -1, "phase": "loading"}),
+    );
+    let engine = crate::ai::engine().map_err(|e| format!("modelo IA: {e}"))?;
+
+    // Conexión propia (WAL → no bloquea las lecturas de la UI).
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    // Reindex completo: limpiar primero (los candidatos vienen "todos").
+    if rebuild {
+        db::clear_embeddings(&conn, &model).map_err(|e| e.to_string())?;
+    }
+    let candidates =
+        db::embedding_candidates(&conn, &model, rebuild).map_err(|e| e.to_string())?;
+    let total = candidates.len() as i64;
+    let _ = app.emit("ai://index", serde_json::json!({"done": 0, "total": total}));
+
+    let mut done = 0i64;
+    const BATCH: usize = 8;
+    for chunk in candidates.chunks(BATCH) {
+        let bytes: Vec<Vec<u8>> = chunk.iter().map(|(_, b)| b.clone()).collect();
+        let vecs = {
+            let e = engine.lock().unwrap();
+            e.embed_images(&bytes)
+                .map_err(|err| format!("embedding: {err}"))?
+        };
+        for ((entry_id, _), v) in chunk.iter().zip(vecs.iter()) {
+            // Imagen (o frame único cacheado) → frame_ts None.
+            db::store_embedding(&conn, *entry_id, &model, None, v).map_err(|e| e.to_string())?;
+        }
+        done += chunk.len() as i64;
+        let _ = app.emit("ai://index", serde_json::json!({"done": done, "total": total}));
+    }
+    Ok(done)
+}
+
+#[cfg(not(feature = "ai"))]
+#[tauri::command(async)]
+pub async fn ai_index(_app: tauri::AppHandle, _rebuild: Option<bool>) -> Result<i64, String> {
+    Err("IA no compilada en este build (compilá con --features ai)".into())
+}
+
+/// Búsqueda semántica: embebe la query y rankea por coseno contra los embeddings.
+/// `threshold` filtra por score mínimo; `limit` corta el ranking.
+#[cfg(feature = "ai")]
+#[tauri::command(async)]
+pub async fn ai_search(
+    app: tauri::AppHandle,
+    query: String,
+    threshold: Option<f32>,
+    limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || ai_search_blocking(app, query, threshold, limit))
+        .await
+        .map_err(|e| format!("error en la búsqueda IA: {e}"))?
+}
+
+#[cfg(feature = "ai")]
+fn ai_search_blocking(
+    app: tauri::AppHandle,
+    query: String,
+    threshold: Option<f32>,
+    limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    use tauri::Manager;
+    let thr = threshold.unwrap_or(0.0);
+    let limit = limit.unwrap_or(200).max(1) as usize;
+    let model = crate::ai::MODEL_REPO.to_string();
+
+    // Embedding de la query (carga el modelo si hace falta).
+    let qv = {
+        let engine = crate::ai::engine().map_err(|e| format!("modelo IA: {e}"))?;
+        let e = engine.lock().unwrap();
+        e.embed_text(&query)
+            .map_err(|err| format!("embedding texto: {err}"))?
+    };
+
+    let state = app.state::<AppState>();
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    rank_embeddings_to_items(&cat.conn, &model, &qv, thr, limit, None)
+}
+
+/// Rankea todas las entradas con embedding contra un vector de query (coseno =
+/// producto punto, vectores ya normalizados). Un clip aporta varias filas
+/// (frames): se queda con la MEJOR por entrada y su timestamp. `exclude` omite
+/// una entrada (la de origen, en "buscar similares"). Devuelve `SemanticItem`s.
+#[cfg(feature = "ai")]
+fn rank_embeddings_to_items(
+    conn: &rusqlite::Connection,
+    model: &str,
+    qv: &[f32],
+    thr: f32,
+    limit: usize,
+    exclude: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    use std::collections::HashMap;
+    let embs = db::load_embeddings(conn, model).map_err(|e| e.to_string())?;
+
+    let mut best: HashMap<i64, (f32, Option<f64>)> = HashMap::new();
+    for (id, ts, v) in &embs {
+        if Some(*id) == exclude || v.len() != qv.len() {
+            continue;
+        }
+        let dot: f32 = v.iter().zip(qv.iter()).map(|(a, b)| a * b).sum();
+        let e = best.entry(*id).or_insert((f32::MIN, None));
+        if dot > e.0 {
+            *e = (dot, *ts);
+        }
+    }
+    let mut scored: Vec<(f32, Option<f64>, i64)> = best
+        .into_iter()
+        .filter(|(_, (s, _))| *s >= thr)
+        .map(|(id, (s, ts))| (s, ts, id))
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+
+    let smap: HashMap<i64, (f32, Option<f64>)> =
+        scored.iter().map(|(s, ts, id)| (*id, (*s, *ts))).collect();
+    let ids: Vec<i64> = scored.iter().map(|(_, _, id)| *id).collect();
+    let items = db::search_items_by_ids(conn, &ids).map_err(|e| e.to_string())?;
+    Ok(items
+        .into_iter()
+        .map(|item| {
+            let (score, frame_ts) = smap.get(&item.id).copied().unwrap_or((0.0, None));
+            db::SemanticItem {
+                item,
+                score,
+                frame_ts,
+            }
+        })
+        .collect())
+}
+
+/// Promedia + normaliza L2 los vectores de un archivo → su "firma" para similares.
+#[cfg(feature = "ai")]
+fn mean_normalize(vs: &[Vec<f32>]) -> Option<Vec<f32>> {
+    let dim = vs.iter().find(|v| !v.is_empty())?.len();
+    let mut acc = vec![0f32; dim];
+    let mut n = 0usize;
+    for v in vs {
+        if v.len() != dim {
+            continue;
+        }
+        for (a, x) in acc.iter_mut().zip(v) {
+            *a += x;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    let norm = acc.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm <= 0.0 {
+        return None;
+    }
+    for a in acc.iter_mut() {
+        *a /= norm;
+    }
+    Some(acc)
+}
+
+#[cfg(not(feature = "ai"))]
+#[tauri::command(async)]
+pub async fn ai_search(
+    _app: tauri::AppHandle,
+    _query: String,
+    _threshold: Option<f32>,
+    _limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    Err("IA no compilada en este build (compilá con --features ai)".into())
+}
+
+/// IA Fase 5 — "buscar similares": dado un archivo ya indexado, encuentra los
+/// visualmente parecidos por coseno contra su firma (promedio de sus vectores).
+/// No necesita cargar el modelo (usa embeddings ya guardados).
+#[cfg(feature = "ai")]
+#[tauri::command(async)]
+pub async fn ai_similar(
+    app: tauri::AppHandle,
+    entry_id: i64,
+    threshold: Option<f32>,
+    limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || ai_similar_blocking(app, entry_id, threshold, limit))
+        .await
+        .map_err(|e| format!("error en la búsqueda de similares: {e}"))?
+}
+
+#[cfg(feature = "ai")]
+fn ai_similar_blocking(
+    app: tauri::AppHandle,
+    entry_id: i64,
+    threshold: Option<f32>,
+    limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    use tauri::Manager;
+    let thr = threshold.unwrap_or(0.0);
+    let limit = limit.unwrap_or(200).max(1) as usize;
+    let model = crate::ai::MODEL_REPO.to_string();
+
+    let state = app.state::<AppState>();
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+
+    let vs = db::load_entry_embeddings(&cat.conn, entry_id, &model).map_err(|e| e.to_string())?;
+    if vs.is_empty() {
+        return Err("ese archivo todavía no está indexado para IA (indexá primero)".into());
+    }
+    let qv = mean_normalize(&vs).ok_or("el embedding del archivo es inválido")?;
+    rank_embeddings_to_items(&cat.conn, &model, &qv, thr, limit, Some(entry_id))
+}
+
+#[cfg(not(feature = "ai"))]
+#[tauri::command(async)]
+pub async fn ai_similar(
+    _app: tauri::AppHandle,
+    _entry_id: i64,
+    _threshold: Option<f32>,
+    _limit: Option<i64>,
+) -> Result<Vec<db::SemanticItem>, String> {
+    Err("IA no compilada en este build (compilá con --features ai)".into())
+}
+
+/// IA Fase 5 — duplicados VISUALES: agrupa entradas cuyo contenido es casi idéntico
+/// (coseno ≥ `threshold`, def 0.92) aunque difieran en bytes (re-export/recompresión,
+/// que el hash exacto no agarra). Clustering greedy O(n²) sobre la firma por entrada.
+/// Devuelve el mismo shape que los duplicados exactos (ordenado por espacio recuperable).
+#[cfg(feature = "ai")]
+#[tauri::command(async)]
+pub async fn ai_visual_duplicates(
+    app: tauri::AppHandle,
+    threshold: Option<f32>,
+    min_size: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<db::DupGroup>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_visual_duplicates_blocking(app, threshold, min_size, limit)
+    })
+    .await
+    .map_err(|e| format!("error en la búsqueda de duplicados visuales: {e}"))?
+}
+
+#[cfg(feature = "ai")]
+fn ai_visual_duplicates_blocking(
+    app: tauri::AppHandle,
+    threshold: Option<f32>,
+    min_size: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<db::DupGroup>, String> {
+    use std::collections::HashMap;
+    use tauri::Manager;
+    let thr = threshold.unwrap_or(0.92);
+    let min_size = min_size.unwrap_or(1_048_576);
+    let limit = limit.unwrap_or(500).max(1) as usize;
+    let model = crate::ai::MODEL_REPO.to_string();
+
+    let state = app.state::<AppState>();
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+
+    // Firma por entrada = promedio normalizado de sus vectores (1 imagen / N frames).
+    let embs = db::load_embeddings(&cat.conn, &model).map_err(|e| e.to_string())?;
+    let mut by_id: HashMap<i64, Vec<Vec<f32>>> = HashMap::new();
+    for (id, _ts, v) in embs {
+        by_id.entry(id).or_default().push(v);
+    }
+    let reps: Vec<(i64, Vec<f32>)> = by_id
+        .into_iter()
+        .filter_map(|(id, vs)| mean_normalize(&vs).map(|v| (id, v)))
+        .collect();
+
+    // Clustering greedy por umbral alto.
+    let n = reps.len();
+    let mut assigned = vec![false; n];
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    for i in 0..n {
+        if assigned[i] {
+            continue;
+        }
+        assigned[i] = true;
+        let mut group = vec![i];
+        for j in (i + 1)..n {
+            if assigned[j] {
+                continue;
+            }
+            let dot: f32 = reps[i].1.iter().zip(&reps[j].1).map(|(a, b)| a * b).sum();
+            if dot >= thr {
+                assigned[j] = true;
+                group.push(j);
+            }
+        }
+        if group.len() >= 2 {
+            clusters.push(group);
+        }
+    }
+
+    // Construir grupos con disco + ruta, filtrar por tamaño y ordenar por recuperable.
+    let mut out: Vec<db::DupGroup> = Vec::new();
+    for cluster in clusters {
+        let ids: Vec<i64> = cluster.iter().map(|&k| reps[k].0).collect();
+        let items_si = db::search_items_by_ids(&cat.conn, &ids).map_err(|e| e.to_string())?;
+        let items: Vec<db::BigFile> = items_si
+            .into_iter()
+            .map(|it| db::BigFile {
+                id: it.id,
+                name: it.name,
+                disk_name: it.disk_name,
+                size_logical: it.size_logical,
+                path: it.path,
+            })
+            .collect();
+        if items.len() < 2 {
+            continue;
+        }
+        let max_size = items.iter().map(|i| i.size_logical).max().unwrap_or(0);
+        if max_size < min_size {
+            continue;
+        }
+        let total: i64 = items.iter().map(|i| i.size_logical).sum();
+        let name = items
+            .iter()
+            .max_by_key(|i| i.size_logical)
+            .map(|i| i.name.clone())
+            .unwrap_or_default();
+        out.push(db::DupGroup {
+            name,
+            size: max_size,
+            count: items.len() as i64,
+            wasted: total - max_size,
+            items,
+        });
+    }
+    out.sort_by(|a, b| b.wasted.cmp(&a.wasted));
+    out.truncate(limit);
+    Ok(out)
+}
+
+#[cfg(not(feature = "ai"))]
+#[tauri::command(async)]
+pub async fn ai_visual_duplicates(
+    _app: tauri::AppHandle,
+    _threshold: Option<f32>,
+    _min_size: Option<i64>,
+    _limit: Option<i64>,
+) -> Result<Vec<db::DupGroup>, String> {
+    Err("IA no compilada en este build (compilá con --features ai)".into())
+}
+
+/// IA Fase 2 — indexa el CONTENIDO de los videos de un disco MONTADO: muestrea
+/// `frames` por clip (repartidos en la duración), los embebe y los guarda con su
+/// timestamp → permite "buscar el momento" dentro del clip. Emite `ai://index`.
+#[cfg(feature = "ai")]
+#[tauri::command(async)]
+pub async fn ai_index_videos(
+    app: tauri::AppHandle,
+    disk_id: i64,
+    frames: Option<usize>,
+) -> Result<i64, String> {
+    let frames = frames.unwrap_or(8).clamp(1, 32);
+    tauri::async_runtime::spawn_blocking(move || ai_index_videos_blocking(app, disk_id, frames))
+        .await
+        .map_err(|e| format!("error en la tarea de indexado de video IA: {e}"))?
+}
+
+#[cfg(feature = "ai")]
+fn ai_index_videos_blocking(
+    app: tauri::AppHandle,
+    disk_id: i64,
+    frames: usize,
+) -> Result<i64, String> {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let path = {
+        let guard = state.catalog.lock().unwrap();
+        guard
+            .as_ref()
+            .ok_or("no hay catálogo abierto")?
+            .path
+            .clone()
+    };
+    let model = crate::ai::MODEL_REPO.to_string();
+
+    let _ = app.emit(
+        "ai://index",
+        serde_json::json!({"done": 0, "total": -1, "phase": "loading"}),
+    );
+    let engine = crate::ai::engine().map_err(|e| format!("modelo IA: {e}"))?;
+
+    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let candidates = db::video_embedding_candidates(&conn, disk_id, &model, VIDEO_THUMB_EXTS)
+        .map_err(|e| e.to_string())?;
+    let total = candidates.len() as i64;
+    let _ = app.emit("ai://index", serde_json::json!({"done": 0, "total": total}));
+
+    let mut done = 0i64;
+    for entry_id in candidates {
+        // Ruta real (necesita el disco montado). Si no resuelve, saltar el clip.
+        if let Ok(real) = resolve_real_path(&conn, entry_id) {
+            let dur_ms = video::probe_video(&real).map(|m| m.duration_ms).unwrap_or(0);
+            let tss = video::strip_timestamps(dur_ms, frames);
+
+            // Extraer cada frame (los que fallen se omiten).
+            let mut ts_ok: Vec<f64> = Vec::new();
+            let mut bytes: Vec<Vec<u8>> = Vec::new();
+            for ts in tss {
+                if let Ok(jpg) = video::extract_frame(&real, ts, 256) {
+                    ts_ok.push(ts);
+                    bytes.push(jpg);
+                }
+            }
+
+            if !bytes.is_empty() {
+                let vecs = {
+                    let e = engine.lock().unwrap();
+                    e.embed_images(&bytes)
+                        .map_err(|err| format!("embedding: {err}"))?
+                };
+                // Reemplaza embeddings previos del clip (p.ej. el frame único de Fase 1).
+                db::delete_embeddings_for_entry(&conn, entry_id, &model)
+                    .map_err(|e| e.to_string())?;
+                for (ts, v) in ts_ok.iter().zip(vecs.iter()) {
+                    db::store_embedding(&conn, entry_id, &model, Some(*ts), v)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        done += 1;
+        let _ = app.emit("ai://index", serde_json::json!({"done": done, "total": total}));
+    }
+    Ok(done)
+}
+
+#[cfg(not(feature = "ai"))]
+#[tauri::command(async)]
+pub async fn ai_index_videos(
+    _app: tauri::AppHandle,
+    _disk_id: i64,
+    _frames: Option<usize>,
+) -> Result<i64, String> {
+    Err("IA no compilada en este build (compilá con --features ai)".into())
 }

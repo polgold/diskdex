@@ -16,6 +16,7 @@ export interface SearchFilters {
   modified_after?: number;
   modified_before?: number;
   kind?: "file" | "folder";
+  place?: string;
 }
 
 /** Categorías de tipo de archivo (estilo Dropbox) → sets de extensiones. */
@@ -127,6 +128,14 @@ export function parseQuery(input: string): SearchFilters {
         const clean = t.trim().toLowerCase();
         if (clean && !f.tags.includes(clean)) f.tags.push(clean);
       }
+      continue;
+    }
+
+    // place:Jujuy | lugar:… | ubicacion:…  → filtra por ubicación GPS resuelta (C1)
+    m = /^(?:place|lugar|ubicacion|ubicación):(.+)$/i.exec(tok);
+    if (m) {
+      const v = m[1].trim();
+      if (v) f.place = f.place ? `${f.place} ${v}` : v;
       continue;
     }
 

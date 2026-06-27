@@ -17,6 +17,14 @@ autobins = false
 # Uso: cargo run --release --features tools --bin validate_dcmf -- ...
 tools = []
 
+# IA local (spike Fase 1): búsqueda semántica de imágenes/video con CLIP/SigLIP
+# multilingüe vía candle. Pesa el build (candle-transformers), por eso está
+# APAGADA por default. Uso: cargo run --features ai --bin embed_probe -- <catalog> <query...>
+ai = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub"]
+# BLAS de Apple (Accelerate) para inferencia rápida en CPU (Intel/ARM mac).
+# Uso junto a `ai`: cargo run --features ai,accel --profile release-ai --bin embed_probe
+accel = ["dep:accelerate-src", "candle-core/accelerate"]
+
 [lib]
 # El sufijo `_lib` evita conflicto de nombre con el binario en Windows.
 name = "diskdex_lib"
@@ -42,6 +50,13 @@ required-features = ["tools"]
 name = "scan_probe"
 path = "src/bin/scan_probe.rs"
 required-features = ["tools"]
+
+# Spike IA Fase 1: corre SigLIP multilingüe sobre los thumbnails ya cacheados de
+# un catálogo real y rankea por una query de texto ("perros", "árboles"…).
+[[bin]]
+name = "embed_probe"
+path = "src/bin/embed_probe.rs"
+required-features = ["ai"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -87,9 +102,25 @@ unrar = "0.5"
 # Mover a la papelera del sistema (limpieza de discos), multiplataforma.
 trash = "5"
 
+# Reverse-geocoding OFFLINE (C1): mapea lat/lon → ciudad/provincia/país sin red.
+# Bundlea un dataset de ciudades (GeoNames) → habilita buscar "clips de Jujuy".
+reverse_geocoder = "4"
+
 # Utilidades.
 anyhow = "1"
 thiserror = "2"
+
+# --- IA local (feature `ai`, opcional; spike Fase 1) ---
+# Inferencia en Rust puro (CPU acá en Intel; Metal/accelerate vienen después).
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+# Tokenizer del encoder de texto multilingüe (tokenizer.json del repo de HF).
+tokenizers = { version = "0.21", optional = true }
+# Descarga + caché del modelo desde Hugging Face (~/.cache/huggingface).
+hf-hub = { version = "0.4", optional = true }
+# BLAS de Apple para candle (feature `accel`).
+accelerate-src = { version = "0.3", optional = true }
 
 # statfs (tipo de FS + tamaños) para detectar volúmenes de red montados que
 # sysinfo no enumera (SMB/AFP/NFS) en /Volumes.
@@ -107,3 +138,10 @@ windows = { version = "0.58", features = [
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Perfil para iterar el spike de IA: opt-level 3 (inferencia rápida) pero SIN LTO
+# ni codegen-units=1, así candle compila en minutos en vez de decenas de minutos.
+[profile.release-ai]
+inherits = "release"
+lto = false
+codegen-units = 16

@@ -59,6 +59,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "app.cancellingDisk": "Cancelando",
     "app.scanningDisk": "Escaneando",
     "app.savingDisk": "Guardando en el catálogo",
+    "app.hashingDisk": "Calculando hashes",
     "app.cancelScanTip": "Cancelar escaneo",
 
     // ── App: detección de disco (banner + popup) ──
@@ -162,6 +163,38 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.countRows": "{count} filas en la vista",
     "toolbar.viewTable": "Vista tabla",
     "toolbar.viewGrid": "Vista galería",
+    "toolbar.backup": "Backup",
+
+    // ── Auditoría de backup (B1) ──
+    "backup.title": "Auditar backup",
+    "backup.source": "Origen",
+    "backup.dest": "Destino (backup)",
+    "backup.compare": "Comparar",
+    "backup.pickDisk": "Elegí un disco…",
+    "backup.help":
+      "Compara qué archivos del origen están en el destino. Funciona aunque los discos estén desconectados (compara el catálogo). Verifica por hash si escaneaste con «Calcular hashes».",
+    "backup.allBackedUp": "Todo respaldado: {n} archivos verificados por hash.",
+    "backup.allPresentUnverified": "Todo presente, pero {n} sin verificar por hash (escaneá con «Calcular hashes» para confirmar).",
+    "backup.missingSummary": "Faltan {n} archivos ({bytes}) en el destino.",
+    "backup.ok": "verificados",
+    "backup.missing": "faltan",
+    "backup.mismatch": "difieren",
+    "backup.unverified": "sin verificar",
+    "backup.extra": "extra en destino",
+    "backup.mismatchTitle": "Difieren (¡copia parcial o corrupta!)",
+    "backup.missingTitle": "Faltan en el destino",
+    "backup.unverifiedTitle": "Presentes, sin verificar por hash",
+    "backup.andMore": "…y {n} más",
+    "backup.copyMissing": "Copiar lo que falta ({n} · {bytes})",
+    "backup.copyHelp": "Copia al destino los archivos faltantes. Requiere ambos discos montados. No sobreescribe nada y verifica cada copia por hash.",
+    "backup.confirmCopy": "¿Copiar {n} archivos ({bytes}) al destino?\n\nRequiere que ambos discos estén montados. No se sobreescribe nada existente; cada archivo se verifica por hash tras copiarse.",
+    "backup.copying": "Copiando {count}/{total}…",
+    "backup.copyDone": "Copia completa",
+    "backup.copyCancelled": "Copia cancelada",
+    "backup.copyCopied": "Copiados: {n} ({bytes})",
+    "backup.copyVerified": "{n} verificados por hash",
+    "backup.copySkipped": "{n} ya existían",
+    "backup.copyFailed": "{n} fallaron",
 
     // ── Sidebar ──
     "sidebar.emptyHint": "Importá o escaneá un disco para empezar.",
@@ -184,6 +217,12 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "inspector.items": "Elementos",
     "inspector.created": "Creado",
     "inspector.modified": "Modificado",
+    "inspector.metaTitle": "Ubicación y cámara",
+    "inspector.place": "Lugar",
+    "inspector.coords": "Coordenadas",
+    "inspector.camera": "Cámara",
+    "inspector.captured": "Capturado",
+    "inspector.hash": "Hash (BLAKE3)",
     "inspector.fullPath": "Ruta completa",
     "inspector.keywords": "Keywords",
     "inspector.searchTagged": "Buscar todo lo etiquetado «{tag}»",
@@ -231,6 +270,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "scandlg.afterScan": "Tras escanear:",
     "scandlg.scanOptions": "Opciones:",
     "scandlg.excludeJunk": "Excluir basura (node_modules, caches…)",
+    "scandlg.enrich": "Calcular hashes (para backup)",
     "scandlg.thumbnails": "Miniaturas",
     "scandlg.analyzeVideos": "Analizar videos",
     "scandlg.archiveContents": "Contenido de archivos",
@@ -241,6 +281,25 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "search.placeholder": "Buscar…  ej: render tag:boda ext:mov size>1gb after:2023-01-01  (⌘F)",
     "search.tokensHint":
       "Tokens: tag:boda,4k · ext:mov,mp4 · size>1gb · size<500mb · after:2023-01-01 · before:2024-06-01 · type:file|folder",
+
+    // ── IA / búsqueda semántica (Fase 1) ──
+    "ai.toggle": "Búsqueda por contenido (IA)",
+    "ai.placeholder": "Buscar por contenido…  ej: «videos del 2022 en la playa de más de 2gb»",
+    "ai.status": "{embedded}/{candidates} imágenes indexadas",
+    "ai.index": "Indexar",
+    "ai.reindex": "Reindexar todo",
+    "ai.indexing": "Indexando… {done}/{total}",
+    "ai.loadingModel": "Cargando modelo de IA…",
+    "ai.threshold": "Umbral",
+    "ai.empty": "Sin resultados sobre el umbral. Bajá el umbral o indexá más imágenes.",
+    "ai.needIndex": "Todavía no indexaste imágenes. Tocá «Indexar» para buscar por contenido.",
+    "ai.unavailable": "La IA no está disponible en este build (compilá con --features ai).",
+    "ai.score": "afinidad",
+    "ai.indexVideos": "Indexar videos de «{disk}»",
+    "ai.indexVideosHint":
+      "Muestrea frames de cada clip del disco (debe estar montado) para buscar el momento exacto dentro del video.",
+    "ai.momentTip": "Momento del clip donde mejor coincide",
+    "ai.similar": "Buscar similares (IA)",
 
     // ── ShareDialog ──
     "share.title": "Compartir (conector seguro)",
@@ -280,6 +339,10 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "dups.recoverable": "recuperables",
     "dups.searching": "buscando duplicados…",
     "dups.empty": "Sin duplicados con ese tamaño mínimo.",
+    "dups.exact": "Exactos",
+    "dups.visual": "Visuales (IA)",
+    "dups.visualTip":
+      "Agrupa imágenes/clips de contenido casi idéntico aunque difieran en bytes (re-export, recompresión). Requiere haber indexado para IA.",
 
     // ── Errores del backend (fase 2) ──
     "error.noCatalog": "no hay catálogo abierto",
@@ -375,6 +438,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "app.cancellingDisk": "Cancelling",
     "app.scanningDisk": "Scanning",
     "app.savingDisk": "Saving to catalog",
+    "app.hashingDisk": "Computing hashes",
     "app.cancelScanTip": "Cancel scan",
 
     // ── App: disk detection (banner + popup) ──
@@ -478,6 +542,38 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.countRows": "{count} rows in view",
     "toolbar.viewTable": "Table view",
     "toolbar.viewGrid": "Gallery view",
+    "toolbar.backup": "Backup",
+
+    // ── Backup audit (B1) ──
+    "backup.title": "Backup audit",
+    "backup.source": "Source",
+    "backup.dest": "Destination (backup)",
+    "backup.compare": "Compare",
+    "backup.pickDisk": "Pick a disk…",
+    "backup.help":
+      "Compares which source files are present in the destination. Works even if the disks are offline (it compares the catalog). Verifies by hash if you scanned with “Compute hashes”.",
+    "backup.allBackedUp": "Fully backed up: {n} files verified by hash.",
+    "backup.allPresentUnverified": "All present, but {n} not hash-verified (scan with “Compute hashes” to confirm).",
+    "backup.missingSummary": "{n} files missing ({bytes}) in the destination.",
+    "backup.ok": "verified",
+    "backup.missing": "missing",
+    "backup.mismatch": "differ",
+    "backup.unverified": "unverified",
+    "backup.extra": "extra in dest",
+    "backup.mismatchTitle": "Differ (partial or corrupt copy!)",
+    "backup.missingTitle": "Missing in destination",
+    "backup.unverifiedTitle": "Present, not hash-verified",
+    "backup.andMore": "…and {n} more",
+    "backup.copyMissing": "Copy what's missing ({n} · {bytes})",
+    "backup.copyHelp": "Copies the missing files to the destination. Requires both disks mounted. Never overwrites anything and verifies each copy by hash.",
+    "backup.confirmCopy": "Copy {n} files ({bytes}) to the destination?\n\nRequires both disks mounted. Nothing existing is overwritten; each file is hash-verified after copying.",
+    "backup.copying": "Copying {count}/{total}…",
+    "backup.copyDone": "Copy complete",
+    "backup.copyCancelled": "Copy cancelled",
+    "backup.copyCopied": "Copied: {n} ({bytes})",
+    "backup.copyVerified": "{n} hash-verified",
+    "backup.copySkipped": "{n} already existed",
+    "backup.copyFailed": "{n} failed",
 
     // ── Sidebar ──
     "sidebar.emptyHint": "Import or scan a disk to get started.",
@@ -500,6 +596,12 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "inspector.items": "Items",
     "inspector.created": "Created",
     "inspector.modified": "Modified",
+    "inspector.metaTitle": "Location & camera",
+    "inspector.place": "Place",
+    "inspector.coords": "Coordinates",
+    "inspector.camera": "Camera",
+    "inspector.captured": "Captured",
+    "inspector.hash": "Hash (BLAKE3)",
     "inspector.fullPath": "Full path",
     "inspector.keywords": "Keywords",
     "inspector.searchTagged": "Search everything tagged «{tag}»",
@@ -547,6 +649,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "scandlg.afterScan": "After scanning:",
     "scandlg.scanOptions": "Options:",
     "scandlg.excludeJunk": "Exclude junk (node_modules, caches…)",
+    "scandlg.enrich": "Compute hashes (for backup)",
     "scandlg.thumbnails": "Thumbnails",
     "scandlg.analyzeVideos": "Analyze videos",
     "scandlg.archiveContents": "Archive contents",
@@ -557,6 +660,25 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "search.placeholder": "Search…  e.g.: render tag:boda ext:mov size>1gb after:2023-01-01  (⌘F)",
     "search.tokensHint":
       "Tokens: tag:boda,4k · ext:mov,mp4 · size>1gb · size<500mb · after:2023-01-01 · before:2024-06-01 · type:file|folder",
+
+    // ── AI / semantic search (Phase 1) ──
+    "ai.toggle": "Search by content (AI)",
+    "ai.placeholder": "Search by content…  e.g.: “videos from 2022 on the beach over 2gb”",
+    "ai.status": "{embedded}/{candidates} images indexed",
+    "ai.index": "Index",
+    "ai.reindex": "Reindex all",
+    "ai.indexing": "Indexing… {done}/{total}",
+    "ai.loadingModel": "Loading AI model…",
+    "ai.threshold": "Threshold",
+    "ai.empty": "No results above threshold. Lower the threshold or index more images.",
+    "ai.needIndex": "No images indexed yet. Click “Index” to search by content.",
+    "ai.unavailable": "AI is not available in this build (compile with --features ai).",
+    "ai.score": "affinity",
+    "ai.indexVideos": "Index videos of “{disk}”",
+    "ai.indexVideosHint":
+      "Samples frames from each clip on the disk (must be mounted) to find the exact moment inside a video.",
+    "ai.momentTip": "Moment in the clip where it best matches",
+    "ai.similar": "Find similar (AI)",
 
     // ── ShareDialog ──
     "share.title": "Share (secure connector)",
@@ -596,6 +718,10 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "dups.recoverable": "recoverable",
     "dups.searching": "searching duplicates…",
     "dups.empty": "No duplicates at that minimum size.",
+    "dups.exact": "Exact",
+    "dups.visual": "Visual (AI)",
+    "dups.visualTip":
+      "Groups images/clips with near-identical content even if the bytes differ (re-export, recompression). Requires AI indexing.",
 
     // ── Backend errors (phase 2) ──
     "error.noCatalog": "no catalog open",

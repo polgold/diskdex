@@ -7,6 +7,7 @@ import {
   type SearchResult,
 } from "../lib/ipc";
 import { parseQuery, hasCriteria, type SearchFilters } from "../lib/query-parser";
+import { parseNaturalQuery, applyNLFilters, hasStructured } from "../lib/nl-parser";
 
 export interface Crumb {
   id: number | null; // null = raíz del disco
@@ -55,6 +56,17 @@ interface CatalogState {
   searchResult: SearchResult | null;
   searching: boolean;
   parsedFilters: SearchFilters | null;
+
+  // Búsqueda semántica (IA Fase 1)
+  semantic: boolean;
+  semanticThreshold: number;
+  setSemantic: (b: boolean) => void;
+  setSemanticThreshold: (t: number) => void;
+  // IA disponible en el build (feature `ai`) — la UI muestra/oculta lo semántico.
+  aiAvailable: boolean;
+  setAiAvailable: (b: boolean) => void;
+  // Buscar visualmente similares a una entrada (Fase 5)
+  runSimilar: (entryId: number) => Promise<void>;
 
   refreshDisks: () => Promise<void>;
   refreshOnlineFromDisk: () => Promise<void>;
@@ -131,6 +143,54 @@ export const useCatalog = create<CatalogState>((set, get) => ({
   searchResult: null,
   searching: false,
   parsedFilters: null,
+
+  semantic: false,
+  semanticThreshold: (() => {
+    try {
+      const v = parseFloat(localStorage.getItem("diskdex:semanticThreshold") ?? "");
+      return Number.isFinite(v) ? v : 0.05;
+    } catch {
+      return 0.05;
+    }
+  })(),
+  setSemantic: (b) => {
+    set({ semantic: b });
+    void get().runSearch(get().searchQuery);
+  },
+  setSemanticThreshold: (th) => {
+    try {
+      localStorage.setItem("diskdex:semanticThreshold", String(th));
+    } catch {
+      /* ignore */
+    }
+    set({ semanticThreshold: th });
+  },
+
+  aiAvailable: false,
+  setAiAvailable: (b) => set({ aiAvailable: b }),
+  runSimilar: async (entryId) => {
+    const token = ++searchToken;
+    set({
+      mode: "search",
+      searching: true,
+      searchResult: null,
+      selectedEntryId: null,
+      selectedIds: [],
+      parsedFilters: null,
+      searchQuery: "",
+    });
+    try {
+      const items = await api.aiSimilar(entryId, 0, 300);
+      if (token === searchToken) {
+        set({ searchResult: { total: items.length, items, truncated: false }, searching: false });
+      }
+    } catch (e) {
+      if (token === searchToken) {
+        set({ searching: false });
+        get().setError(String(e));
+      }
+    }
+  },
 
   refreshDisks: async () => {
     try {
@@ -241,6 +301,39 @@ export const useCatalog = create<CatalogState>((set, get) => ({
 
   runSearch: async (query) => {
     set({ searchQuery: query });
+
+    // Modo semántico (IA Fase 3): la query es lenguaje natural → se separa en
+    // filtros estructurados (tipo/fecha/tamaño) + concepto visual. El concepto se
+    // embebe y rankea por contenido; los filtros se aplican sobre el resultado.
+    if (get().semantic) {
+      const nl = parseNaturalQuery(query);
+      const hasConcept = nl.concept.trim().length > 0;
+      if (!hasConcept && !hasStructured(nl.filters)) {
+        set({ mode: "browse", searchResult: null, searching: false, parsedFilters: null });
+        return;
+      }
+      const token = ++searchToken;
+      set({ mode: "search", searching: true, searchResult: null, selectedEntryId: null, selectedIds: [], parsedFilters: nl.filters });
+      try {
+        let items: SearchResult["items"];
+        if (hasConcept) {
+          // Pido un límite amplio para que el post-filtro no se quede corto.
+          const sem = await api.aiSearch(nl.concept, get().semanticThreshold, 2000);
+          items = applyNLFilters(sem, nl.filters).slice(0, 300);
+        } else {
+          // Solo filtros → búsqueda por atributos clásica (sin IA).
+          const r = await api.searchAdvanced(nl.filters, 2000);
+          items = r.items;
+        }
+        if (token === searchToken) {
+          set({ searchResult: { total: items.length, items, truncated: false }, searching: false });
+        }
+      } catch (e) {
+        if (token === searchToken) set({ error: String(e), searching: false });
+      }
+      return;
+    }
+
     const filters = parseQuery(query);
     if (!hasCriteria(filters)) {
       set({ mode: "browse", searchResult: null, searching: false, parsedFilters: null });

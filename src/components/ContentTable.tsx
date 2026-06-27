@@ -16,10 +16,11 @@ import {
   Check,
   AlertTriangle,
   HelpCircle,
+  Sparkles,
 } from "lucide-react";
 import { useCatalog } from "../store/catalog";
-import { formatBytes, formatDate, formatCount, formatAge } from "../lib/format";
-import { api, type SearchItem, type EntryRow, type DiskDetail } from "../lib/ipc";
+import { formatBytes, formatDate, formatCount, formatAge, formatDuration } from "../lib/format";
+import { api, type SearchItem, type SemanticItem, type EntryRow, type DiskDetail } from "../lib/ipc";
 import { revealOriginal, openOriginal, copyText } from "../lib/actions";
 import { useT, useI18n } from "../lib/i18n";
 
@@ -202,6 +203,8 @@ function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => voi
   const setError = useCatalog((s) => s.setError);
   const reloadCurrent = useCatalog((s) => s.reloadCurrent);
   const selectedIds = useCatalog((s) => s.selectedIds);
+  const aiAvailable = useCatalog((s) => s.aiAvailable);
+  const runSimilar = useCatalog((s) => s.runSimilar);
 
   // El borrado opera sobre la selección si el ítem clickeado forma parte de ella;
   // si no, sobre el ítem solo.
@@ -252,6 +255,15 @@ function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => voi
         await copyText(p);
       },
     },
+    ...(aiAvailable && !menu.isFolder
+      ? [
+          {
+            label: t("ai.similar"),
+            icon: <Sparkles className="h-3.5 w-3.5 text-violet-400" />,
+            fn: () => runSimilar(menu.id),
+          },
+        ]
+      : []),
     {
       label:
         batchIds.length > 1
@@ -826,6 +838,14 @@ function SearchTable() {
                   <span className="truncate" title={it.name}>
                     {it.name}
                   </span>
+                  {(it as SemanticItem).frame_ts != null && (
+                    <span
+                      className="shrink-0 rounded bg-violet-600/20 px-1 font-mono text-[10px] text-violet-300"
+                      title={t("ai.momentTip")}
+                    >
+                      ▶ {formatDuration((it as SemanticItem).frame_ts! * 1000)}
+                    </span>
+                  )}
                 </span>
                 <span
                   className="shrink-0 truncate text-xs text-neutral-400"

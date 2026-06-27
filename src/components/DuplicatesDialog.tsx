@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Copy, Loader2, ChevronRight } from "lucide-react";
+import { Copy, Loader2, ChevronRight, Sparkles } from "lucide-react";
 import { api, type DupGroup } from "../lib/ipc";
 import { formatBytes, formatCount } from "../lib/format";
 import { useT } from "../lib/i18n";
+import { useCatalog } from "../store/catalog";
 import { Modal } from "./StatsDialog";
 
 const MIN_SIZE_OPTIONS = [
@@ -12,8 +13,12 @@ const MIN_SIZE_OPTIONS = [
   { label: "≥ 1 GB", value: 1024 * 1_048_576 },
 ];
 
+type DupMode = "exact" | "visual";
+
 export function DuplicatesDialog({ onClose }: { onClose: () => void }) {
   const t = useT();
+  const aiAvailable = useCatalog((s) => s.aiAvailable);
+  const [mode, setMode] = useState<DupMode>("exact");
   const [minSize, setMinSize] = useState(MIN_SIZE_OPTIONS[1].value);
   const [groups, setGroups] = useState<DupGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,16 +26,37 @@ export function DuplicatesDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     setLoading(true);
-    api
-      .findDuplicates(minSize, 500)
-      .then(setGroups)
+    const p =
+      mode === "visual"
+        ? api.aiVisualDuplicates(0.92, minSize, 500)
+        : api.findDuplicates(minSize, 500);
+    p.then(setGroups)
+      .catch(() => setGroups([]))
       .finally(() => setLoading(false));
-  }, [minSize]);
+  }, [minSize, mode]);
 
   const totalWasted = groups.reduce((a, g) => a + g.wasted, 0);
 
   return (
     <Modal onClose={onClose} title={t("dups.title")} icon={<Copy className="h-4 w-4 text-amber-400" />}>
+      {aiAvailable && (
+        <div className="mb-2 flex items-center gap-1 text-xs">
+          <button
+            onClick={() => setMode("exact")}
+            className={`rounded px-2 py-1 ${mode === "exact" ? "bg-neutral-700 text-white" : "text-neutral-400 hover:bg-neutral-800"}`}
+          >
+            {t("dups.exact")}
+          </button>
+          <button
+            onClick={() => setMode("visual")}
+            title={t("dups.visualTip")}
+            className={`flex items-center gap-1 rounded px-2 py-1 ${mode === "visual" ? "bg-violet-600/80 text-white" : "text-violet-300 hover:bg-violet-600/15"}`}
+          >
+            <Sparkles className="h-3 w-3" />
+            {t("dups.visual")}
+          </button>
+        </div>
+      )}
       <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
         <span className="text-neutral-500">{t("dups.minSize")}</span>
         {MIN_SIZE_OPTIONS.map((o) => (

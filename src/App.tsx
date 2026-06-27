@@ -42,7 +42,7 @@ function App() {
   // Previews on-demand por defecto: NO generar todas las miniaturas/frames al
   // escanear (lento). Se generan al pararse en un archivo (rápido). El indexado de
   // archivos comprimidos sí queda activo (no es un "preview", da valor offline).
-  const [postScan, setPostScan] = useState({ thumbnails: false, videos: false, archives: true, excludeJunk: true });
+  const [postScan, setPostScan] = useState({ thumbnails: false, videos: false, archives: true, excludeJunk: true, enrich: false });
   // Escaneos en curso, indexados por mount path (permite varios simultáneos).
   // `cancelling` marca que ya se pidió cancelar (feedback inmediato en la barra).
   const [scanning, setScanning] = useState<
@@ -235,7 +235,7 @@ function App() {
     setScanning((prev) => ({ ...prev, [mountPath]: { mount: mountPath, count: 0, pct: -1, name } }));
     setStatus(t("app.scanning", { name }));
     try {
-      const r = await api.scanDisk(mountPath, name, { exclude_junk: postScan.excludeJunk });
+      const r = await api.scanDisk(mountPath, name, { exclude_junk: postScan.excludeJunk, enrich: postScan.enrich });
       await useCatalog.getState().refreshDisks();
       await useCatalog.getState().refreshOnlineFromDisk();
       setStatus(
@@ -490,6 +490,7 @@ function ScanProgressBar({
   // Preferir el nombre del disco; el mount puede ser "/" (volumen raíz).
   const disk = name || progress.mount.split("/").filter(Boolean).pop() || progress.mount;
   const saving = progress.pct === -2; // fase de guardado (ingesta en el catálogo)
+  const hashing = progress.pct === -3; // fase de enriquecimiento (hash BLAKE3 por archivo)
   return (
     <div>
       <div className="flex items-center justify-between gap-2 text-[11px] text-neutral-400">
@@ -497,6 +498,8 @@ function ScanProgressBar({
           <Loader2 className="h-3 w-3 animate-spin text-primary" />
           {cancelling ? (
             <>{t("app.cancellingDisk")} <span className="text-neutral-200">{disk}</span>…</>
+          ) : hashing ? (
+            <>{t("app.hashingDisk")} <span className="text-neutral-200">{disk}</span>…</>
           ) : saving ? (
             <>{t("app.savingDisk")} <span className="text-neutral-200">{disk}</span>…</>
           ) : (

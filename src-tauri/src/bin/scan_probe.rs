@@ -75,7 +75,7 @@ fn main() {
         let mut conn = db::open(std::path::Path::new(&out)).expect("open catalog");
         let fp = scan::volume_fingerprint(&root);
         let ti = Instant::now();
-        let r = db::ingest_scanned(&mut conn, &disk, fp.as_deref(), "disk", None, &path).expect("ingest");
+        let r = db::ingest_scanned(&mut conn, &disk, fp.as_deref(), "disk", None, &path, None).expect("ingest");
         println!(
             "Ingestado a {out}: disk_id={} entries={} replaced={} en {:.2?}",
             r.disk_id, r.entries, r.replaced, ti.elapsed()

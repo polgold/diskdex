@@ -13,13 +13,12 @@ export interface PostScanOptions {
 interface Props {
   onClose: () => void;
   onScan: (mountPath: string, name: string) => void;
-  scanningPath: string | null;
-  scanProgress: ScanProgress | null;
+  scanning: Record<string, ScanProgress>;
   options: PostScanOptions;
   setOptions: (o: PostScanOptions) => void;
 }
 
-export function ScanDialog({ onClose, onScan, scanningPath, scanProgress, options, setOptions }: Props) {
+export function ScanDialog({ onClose, onScan, scanning, options, setOptions }: Props) {
   const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -75,7 +74,8 @@ export function ScanDialog({ onClose, onScan, scanningPath, scanProgress, option
           {volumes.map((v) => {
             const used = v.total_space - v.available_space;
             const pct = v.total_space > 0 ? Math.min(100, (used / v.total_space) * 100) : 0;
-            const busy = scanningPath === v.mount_path;
+            const prog = scanning[v.mount_path];
+            const busy = !!prog;
             return (
               <div
                 key={v.mount_path}
@@ -101,20 +101,20 @@ export function ScanDialog({ onClose, onScan, scanningPath, scanProgress, option
                   <div className="mt-1 font-mono text-[11px] text-neutral-500">
                     {formatBytes(used)} / {formatBytes(v.total_space)} · {v.mount_path}
                   </div>
-                  {busy && scanProgress && (
+                  {busy && prog && (
                     <div className="mt-1.5">
                       <div className="flex items-center gap-1.5 text-[10px] text-emerald-300/90">
                         <Loader2 className="h-3 w-3 animate-spin" />
                         <span className="font-mono">
-                          {formatCount(scanProgress.count)} entradas
-                          {scanProgress.pct >= 0 ? ` · ${scanProgress.pct}%` : ""}
+                          {formatCount(prog.count)} entradas
+                          {prog.pct >= 0 ? ` · ${prog.pct}%` : ""}
                         </span>
                       </div>
-                      {scanProgress.pct >= 0 && (
+                      {prog.pct >= 0 && (
                         <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-neutral-800">
                           <div
                             className="h-full rounded-full bg-emerald-500 transition-[width] duration-200"
-                            style={{ width: `${scanProgress.pct}%` }}
+                            style={{ width: `${prog.pct}%` }}
                           />
                         </div>
                       )}

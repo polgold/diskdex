@@ -1,9 +1,56 @@
 import { useState } from "react";
-import { Download, BarChart3, Copy, ChevronDown } from "lucide-react";
+import {
+  Download,
+  BarChart3,
+  Copy,
+  ChevronDown,
+  Image as ImageIcon,
+  Film,
+  Music,
+  FileText,
+  Package,
+} from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import { exportRows, type ExportRow, type ExportFormat } from "../lib/export";
+import { FILE_CATEGORIES } from "../lib/query-parser";
 import { StatsDialog } from "./StatsDialog";
 import { DuplicatesDialog } from "./DuplicatesDialog";
+
+const CATEGORY_ICONS: Record<string, React.ReactNode> = {
+  imagen: <ImageIcon className="h-3.5 w-3.5" />,
+  video: <Film className="h-3.5 w-3.5" />,
+  audio: <Music className="h-3.5 w-3.5" />,
+  documento: <FileText className="h-3.5 w-3.5" />,
+  comprimido: <Package className="h-3.5 w-3.5" />,
+};
+
+/** Chips de filtro por tipo de archivo (estilo Dropbox). */
+function CategoryChips() {
+  const runSearch = useCatalog((s) => s.runSearch);
+  const clearSearch = useCatalog((s) => s.clearSearch);
+  const searchQuery = useCatalog((s) => s.searchQuery);
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {Object.entries(FILE_CATEGORIES).map(([key, c]) => {
+        const active = searchQuery.trim() === `cat:${key}`;
+        return (
+          <button
+            key={key}
+            onClick={() => (active ? clearSearch() : runSearch(`cat:${key}`))}
+            className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors ${
+              active
+                ? "border-primary/40 bg-primary/15 text-primary"
+                : "border-border text-neutral-400 hover:bg-accent/60 hover:text-neutral-200"
+            }`}
+          >
+            {CATEGORY_ICONS[key]}
+            {c.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 const FORMATS: { f: ExportFormat; label: string }[] = [
   { f: "csv", label: "CSV" },
@@ -69,7 +116,7 @@ export function ContentToolbar() {
   const count = mode === "search" ? searchResult?.items.length ?? 0 : contentEntries.length;
 
   return (
-    <div className="flex items-center gap-1.5 border-b border-neutral-800 px-3 py-1.5">
+    <div className="flex flex-wrap items-center gap-1.5 border-b border-neutral-800 px-3 py-1.5">
       <div className="relative">
         <button
           onClick={() => setMenuOpen((v) => !v)}
@@ -107,6 +154,9 @@ export function ContentToolbar() {
       >
         <Copy className="h-3.5 w-3.5" /> Duplicados
       </button>
+
+      <div className="mx-1 h-4 w-px bg-neutral-800" />
+      <CategoryChips />
 
       <span className="ml-auto text-[11px] text-neutral-600">
         {count > 0 && `${count.toLocaleString()} filas en la vista`}

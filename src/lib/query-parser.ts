@@ -18,6 +18,53 @@ export interface SearchFilters {
   kind?: "file" | "folder";
 }
 
+/** Categorías de tipo de archivo (estilo Dropbox) → sets de extensiones. */
+export const FILE_CATEGORIES: Record<string, { label: string; exts: string[] }> = {
+  imagen: {
+    label: "Imágenes",
+    exts: [
+      "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "svg",
+      "dng", "arw", "cr2", "cr3", "crw", "nef", "nrw", "raf", "orf", "rw2", "pef", "srw",
+    ],
+  },
+  video: {
+    label: "Videos",
+    exts: [
+      "mp4", "mov", "m4v", "avi", "mkv", "mxf", "mts", "m2ts", "wmv", "webm", "mpg",
+      "mpeg", "3gp", "flv", "ogv", "vob", "m2v", "r3d", "braw",
+    ],
+  },
+  audio: {
+    label: "Audio",
+    exts: ["mp3", "wav", "aiff", "aif", "flac", "aac", "m4a", "ogg", "oga", "wma", "caf"],
+  },
+  documento: {
+    label: "Documentos",
+    exts: [
+      "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "md", "csv",
+      "pages", "numbers", "key", "odt", "ods",
+    ],
+  },
+  comprimido: {
+    label: "Comprimidos",
+    exts: ["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "dmg", "iso", "cbz", "cbr"],
+  },
+};
+
+/** Normaliza un valor de categoría escrito por el usuario a su clave canónica. */
+function normalizeCategory(v: string): string | null {
+  const s = v.trim().toLowerCase();
+  if (FILE_CATEGORIES[s]) return s;
+  const aliases: Record<string, string> = {
+    imagenes: "imagen", "imágenes": "imagen", image: "imagen", images: "imagen", foto: "imagen", fotos: "imagen",
+    videos: "video", clip: "video", clips: "video",
+    sonido: "audio", music: "audio", musica: "audio", "música": "audio",
+    documentos: "documento", doc: "documento", docs: "documento",
+    comprimidos: "comprimido", archive: "comprimido", zip: "comprimido",
+  };
+  return aliases[s] ?? null;
+}
+
 const SIZE_UNITS: Record<string, number> = {
   b: 1,
   kb: 1024,
@@ -57,6 +104,18 @@ export function parseQuery(input: string): SearchFilters {
       for (const e of m[1].split(",")) {
         const clean = e.trim().replace(/^\./, "").toLowerCase();
         if (clean) f.exts.push(clean);
+      }
+      continue;
+    }
+
+    // cat:imagen  /  categoria:video  → expande a su set de extensiones
+    m = /^(?:cat|categoria|categoría):(.+)$/i.exec(lower);
+    if (m) {
+      const key = normalizeCategory(m[1]);
+      if (key) {
+        for (const e of FILE_CATEGORIES[key].exts) {
+          if (!f.exts.includes(e)) f.exts.push(e);
+        }
       }
       continue;
     }

@@ -34,10 +34,10 @@ function App() {
   // Qué hacer DESPUÉS de escanear (cacheo pesado): el usuario decide. En discos
   // grandes/lentos (exFAT, NAS) conviene desactivar lo que no necesita.
   const [postScan, setPostScan] = useState({ thumbnails: true, videos: true, archives: true });
-  const [scanProg, setScanProg] = useState<ScanProgress | null>(null);
+  // Escaneos en curso, indexados por mount path (permite varios simultáneos).
+  const [scanning, setScanning] = useState<Record<string, ScanProgress>>({});
   const [indexProg, setIndexProg] = useState<IndexProgress | null>(null);
   const [scanOpen, setScanOpen] = useState(false);
-  const [scanningPath, setScanningPath] = useState<string | null>(null);
   const [detected, setDetected] = useState<VolumeInfo | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const catalogPathRef = useRef<string | null>(null);
@@ -51,7 +51,7 @@ function App() {
       onVolumeRemoved(() => {
         if (catalogPathRef.current) useCatalog.getState().refreshOnlineFromDisk();
       }),
-      onScanProgress((p) => setScanProg(p)),
+      onScanProgress((p) => setScanning((prev) => ({ ...prev, [p.mount]: p }))),
       onIndexProgress((p) => setIndexProg(p.done >= p.total ? null : p)),
     ];
     // Desactivar el menú contextual del navegador (Inspect/Search…) salvo en
@@ -178,13 +178,12 @@ function App() {
 
   async function handleScan(mountPath: string, name: string) {
     setError(null);
+    if (scanning[mountPath]) return; // ya se está escaneando este disco
     if (!(await ensureCatalog())) return;
-    setScanningPath(mountPath);
-    setScanProg({ count: 0, pct: -1 });
+    setScanning((prev) => ({ ...prev, [mountPath]: { mount: mountPath, count: 0, pct: -1 } }));
     setStatus(`Escaneando ${name}…`);
     try {
       const r = await api.scanDisk(mountPath, name);
-      setScanProg(null);
       await useCatalog.getState().refreshDisks();
       await useCatalog.getState().refreshOnlineFromDisk();
       setStatus(
@@ -225,8 +224,11 @@ function App() {
       setError(String(e));
       setStatus("");
     } finally {
-      setScanningPath(null);
-      setScanProg(null);
+      setScanning((prev) => {
+        const next = { ...prev };
+        delete next[mountPath];
+        return next;
+      });
     }
   }
 
@@ -269,7 +271,7 @@ function App() {
       {detected && (
         <DetectBanner
           volume={detected}
-          busy={scanningPath === detected.mount_path}
+          busy={!!scanning[detected.mount_path]}
           onScan={() => handleScan(detected.mount_path, detected.name)}
           onDismiss={() => setDetected(null)}
         />
@@ -281,13 +283,12 @@ function App() {
         </div>
       )}
 
-      {(scanProg || indexProg) && (
-        <div className="border-b border-border bg-neutral-900/40 px-4 py-1.5">
-          {indexProg ? (
-            <ProgressBar progress={indexProg} />
-          ) : scanProg ? (
-            <ScanProgressBar progress={scanProg} />
-          ) : null}
+      {(Object.keys(scanning).length > 0 || indexProg) && (
+        <div className="space-y-1.5 border-b border-border bg-neutral-900/40 px-4 py-1.5">
+          {Object.values(scanning).map((s) => (
+            <ScanProgressBar key={s.mount} progress={s} />
+          ))}
+          {indexProg && <ProgressBar progress={indexProg} />}
         </div>
       )}
 
@@ -333,8 +334,7 @@ function App() {
         <ScanDialog
           onClose={() => setScanOpen(false)}
           onScan={handleScan}
-          scanningPath={scanningPath}
-          scanProgress={scanProg}
+          scanning={scanning}
           options={postScan}
           setOptions={setPostScan}
         />
@@ -376,12 +376,13 @@ function ProgressBar({ progress }: { progress: IndexProgress }) {
 
 function ScanProgressBar({ progress }: { progress: ScanProgress }) {
   const known = progress.pct >= 0;
+  const disk = progress.mount.split("/").filter(Boolean).pop() ?? progress.mount;
   return (
     <div>
       <div className="flex items-center justify-between text-[11px] text-neutral-400">
         <span className="flex items-center gap-1.5">
           <Loader2 className="h-3 w-3 animate-spin text-primary" />
-          Escaneando…
+          Escaneando <span className="text-neutral-200">{disk}</span>…
         </span>
         <span className="font-mono text-neutral-300">
           {formatCount(progress.count)} entradas{known ? ` · ${progress.pct}%` : ""}

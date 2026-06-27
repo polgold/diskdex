@@ -113,7 +113,7 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
     Ok(meta)
 }
 
-/// Extrae un frame PNG en el segundo `at_secs`, escalado a `max_w` de ancho.
+/// Extrae un frame JPEG en el segundo `at_secs`, escalado a `max_w` de ancho.
 pub fn extract_frame(path: &Path, at_secs: f64, max_w: u32) -> Result<Vec<u8>, String> {
     let bin = which("ffmpeg").ok_or("ffmpeg no está disponible")?;
     // `-ss` antes de `-i` = seek rápido por keyframe (suficiente para thumbnails).
@@ -124,7 +124,7 @@ pub fn extract_frame(path: &Path, at_secs: f64, max_w: u32) -> Result<Vec<u8>, S
         .arg(path)
         .args(["-frames:v", "1", "-vf"])
         .arg(format!("scale={max_w}:-2"))
-        .args(["-f", "image2pipe", "-vcodec", "png", "-"])
+        .args(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "4", "-"])
         .output()
         .map_err(|e| format!("no se pudo ejecutar ffmpeg: {e}"))?;
     if !out.status.success() || out.stdout.is_empty() {

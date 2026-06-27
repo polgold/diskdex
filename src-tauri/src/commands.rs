@@ -70,6 +70,8 @@ pub fn ping() -> String {
 
 #[derive(Clone, Serialize)]
 struct ScanProgress {
+    /// Mount path del disco que se está escaneando (para enrutar el progreso por disco).
+    mount: String,
     count: u64,
     /// % estimado (bytes recorridos / usados del volumen). -1 si se desconoce.
     pct: i32,
@@ -403,8 +405,9 @@ fn thumb_exts() -> Vec<&'static str> {
     THUMB_EXTS.iter().chain(RAW_EXTS.iter()).copied().collect()
 }
 
-/// Renderiza un PNG de thumbnail desde una ruta real. Devuelve (bytes, w, h).
+/// Renderiza un JPEG de thumbnail desde una ruta real. Devuelve (bytes, w, h).
 /// Despacha RAW de cámara a `sips` (macOS) y el resto al crate `image`.
+/// JPEG (no PNG) para que el catálogo no se infle: ~5-10× más chico por miniatura.
 fn render_image_thumb(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u32, u32), String> {
     let ext = path
         .extension()
@@ -413,18 +416,19 @@ fn render_image_thumb(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u32,
     if RAW_EXTS.contains(&ext.as_str()) {
         render_raw_thumbnail(path, max)
     } else {
-        render_thumbnail_png(path, max)
+        render_thumbnail_jpeg(path, max)
     }
 }
 
-fn render_thumbnail_png(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u32, u32), String> {
+fn render_thumbnail_jpeg(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u32, u32), String> {
     let img = image::open(path)
         .map_err(|e| format!("no se pudo generar preview (formato no soportado): {e}"))?;
     let thumb = img.thumbnail(max, max);
     let (w, h) = (thumb.width(), thumb.height());
+    // A RGB8 (JPEG no soporta alfa) y encode JPEG (calidad por defecto ~75).
     let mut buf = std::io::Cursor::new(Vec::new());
-    thumb
-        .write_to(&mut buf, image::ImageFormat::Png)
+    image::DynamicImage::ImageRgb8(thumb.to_rgb8())
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
         .map_err(|e| e.to_string())?;
     Ok((buf.into_inner(), w, h))
 }
@@ -436,9 +440,9 @@ fn render_raw_thumbnail(path: &std::path::Path, max: u32) -> Result<(Vec<u8>, u3
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("diskdex_raw_{}_{}.png", std::process::id(), n));
+    let tmp = std::env::temp_dir().join(format!("diskdex_raw_{}_{}.jpg", std::process::id(), n));
     let out = std::process::Command::new("sips")
-        .args(["-Z", &max.to_string(), "-s", "format", "png"])
+        .args(["-Z", &max.to_string(), "-s", "format", "jpeg"])
         .arg(path)
         .arg("--out")
         .arg(&tmp)
@@ -467,14 +471,12 @@ pub fn get_thumbnail(
     entry_id: i64,
     max: Option<u32>,
 ) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-
     // 1) Cache (offline-friendly).
     {
         let guard = state.catalog.lock().unwrap();
         let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
-        if let Some(png) = db::get_cached_thumbnail(&cat.conn, entry_id).map_err(|e| e.to_string())? {
-            return Ok(format!("data:image/png;base64,{}", STANDARD.encode(png)));
+        if let Some(bytes) = db::get_cached_thumbnail(&cat.conn, entry_id).map_err(|e| e.to_string())? {
+            return Ok(img_data_url(&bytes));
         }
     }
 
@@ -485,14 +487,14 @@ pub fn get_thumbnail(
         resolve_real_path(&cat.conn, entry_id)?
     };
     let max = max.unwrap_or(THUMB_CACHE_MAX).clamp(32, 1024);
-    let (png, w, h) = render_image_thumb(&path, max)?;
+    let (bytes, w, h) = render_image_thumb(&path, max)?;
     {
         let guard = state.catalog.lock().unwrap();
         if let Some(cat) = guard.as_ref() {
-            let _ = db::store_thumbnail(&cat.conn, entry_id, &png, w, h);
+            let _ = db::store_thumbnail(&cat.conn, entry_id, &bytes, w, h);
         }
     }
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(png)))
+    Ok(img_data_url(&bytes))
 }
 
 #[derive(Serialize)]
@@ -567,9 +569,9 @@ const ARCHIVE_EXTS: &[&str] = &["zip", "7z", "rar", "cbz", "cbr"];
 const VIDEO_STRIP_FRAMES: usize = 5;
 const VIDEO_FRAME_W: u32 = 320;
 
-fn png_data_url(png: &[u8]) -> String {
+fn img_data_url(bytes: &[u8]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    format!("data:image/png;base64,{}", STANDARD.encode(png))
+    format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes))
 }
 
 /// ¿Están disponibles ffprobe/ffmpeg? La UI lo usa para mostrar/ocultar features.
@@ -681,7 +683,7 @@ pub fn get_video_frames(
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
     let frames = db::get_video_frames(&cat.conn, entry_id).map_err(|e| e.to_string())?;
-    Ok(frames.iter().map(|p| png_data_url(p)).collect())
+    Ok(frames.iter().map(|p| img_data_url(p)).collect())
 }
 
 /// Detección de escenas on-demand de un video (requiere disco montado). Devuelve
@@ -893,20 +895,21 @@ pub fn scan_disk(
 
     let disk = {
         let app = app.clone();
+        let mp = mount_path.clone();
         scan::scan_volume_cb(&root, &volume_name, &opts, &mut |count, bytes| {
             let pct = if used_bytes > 0 {
                 ((bytes.min(used_bytes)) * 100 / used_bytes).min(99) as i32
             } else {
                 -1
             };
-            let _ = app.emit("scan-progress", ScanProgress { count, pct });
+            let _ = app.emit("scan-progress", ScanProgress { mount: mp.clone(), count, pct });
         })
         .map_err(|e| format!("error escaneando: {e}"))?
     };
     // Señal de fin de fase de escaneo.
     let _ = app.emit(
         "scan-progress",
-        ScanProgress { count: disk.entries.len() as u64, pct: 100 },
+        ScanProgress { mount: mount_path.clone(), count: disk.entries.len() as u64, pct: 100 },
     );
 
     let mut guard = state.catalog.lock().unwrap();

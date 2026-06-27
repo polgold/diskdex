@@ -264,6 +264,7 @@ export const onVolumeRemoved = (cb: (v: VolumeInfo) => void): Promise<UnlistenFn
 
 // Progreso de escaneo / indexado (Fase B).
 export interface ScanProgress {
+  mount: string;
   count: number;
   pct: number; // -1 si se desconoce el total
 }

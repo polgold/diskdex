@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { HardDrive, Usb, Loader2, X, RefreshCw, FolderPlus, Network, Image as ImageIcon, Film, Package } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { api, type VolumeInfo } from "../lib/ipc";
-import { formatBytes } from "../lib/format";
+import { api, type VolumeInfo, type ScanProgress } from "../lib/ipc";
+import { formatBytes, formatCount } from "../lib/format";
 
 export interface PostScanOptions {
   thumbnails: boolean;
@@ -14,11 +14,12 @@ interface Props {
   onClose: () => void;
   onScan: (mountPath: string, name: string) => void;
   scanningPath: string | null;
+  scanProgress: ScanProgress | null;
   options: PostScanOptions;
   setOptions: (o: PostScanOptions) => void;
 }
 
-export function ScanDialog({ onClose, onScan, scanningPath, options, setOptions }: Props) {
+export function ScanDialog({ onClose, onScan, scanningPath, scanProgress, options, setOptions }: Props) {
   const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -100,6 +101,25 @@ export function ScanDialog({ onClose, onScan, scanningPath, options, setOptions 
                   <div className="mt-1 font-mono text-[11px] text-neutral-500">
                     {formatBytes(used)} / {formatBytes(v.total_space)} · {v.mount_path}
                   </div>
+                  {busy && scanProgress && (
+                    <div className="mt-1.5">
+                      <div className="flex items-center gap-1.5 text-[10px] text-emerald-300/90">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        <span className="font-mono">
+                          {formatCount(scanProgress.count)} entradas
+                          {scanProgress.pct >= 0 ? ` · ${scanProgress.pct}%` : ""}
+                        </span>
+                      </div>
+                      {scanProgress.pct >= 0 && (
+                        <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-neutral-800">
+                          <div
+                            className="h-full rounded-full bg-emerald-500 transition-[width] duration-200"
+                            style={{ width: `${scanProgress.pct}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <button
                   onClick={() => onScan(v.mount_path, v.name)}

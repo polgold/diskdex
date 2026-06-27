@@ -113,18 +113,19 @@ fn is_time_machine_artifact(name: &str) -> bool {
 /// Escanea un volumen/carpeta montado y devuelve su árbol como `DcmfDisk`.
 /// `volume_name` define el nombre del nodo raíz (label del volumen).
 pub fn scan_volume(root: &Path, volume_name: &str, opts: &ScanOptions) -> std::io::Result<DcmfDisk> {
-    scan_volume_cb(root, volume_name, opts, &mut |_| {})
+    scan_volume_cb(root, volume_name, opts, &mut |_, _| {})
 }
 
-/// Igual que `scan_volume` pero invoca `progress(entradas_acumuladas)` de forma
-/// periódica durante el recorrido (para reportar avance a la UI).
+/// Igual que `scan_volume` pero invoca `progress(entradas, bytes_lógicos)` de
+/// forma periódica durante el recorrido (para reportar avance a la UI).
 pub fn scan_volume_cb(
     root: &Path,
     volume_name: &str,
     opts: &ScanOptions,
-    progress: &mut dyn FnMut(u64),
+    progress: &mut dyn FnMut(u64, u64),
 ) -> std::io::Result<DcmfDisk> {
     let root_meta = fs::metadata(root)?;
+    let mut bytes_acc: u64 = 0;
     let mut entries: Vec<DcmfEntry> = Vec::new();
 
     // Nodo raíz = volumen.
@@ -193,9 +194,11 @@ pub fn scan_volume_cb(
                 modified: st_to_unix(meta.modified()),
             });
 
+            bytes_acc = bytes_acc.saturating_add(size_logical);
+
             // Reportar avance periódicamente (sin saturar el canal de eventos).
             if entries.len() % 4096 == 0 {
-                progress(entries.len() as u64);
+                progress(entries.len() as u64, bytes_acc);
             }
 
             if is_dir && (!is_symlink || opts.follow_symlinks) {
@@ -204,7 +207,7 @@ pub fn scan_volume_cb(
         }
     }
 
-    progress(entries.len() as u64);
+    progress(entries.len() as u64, bytes_acc);
     Ok(DcmfDisk {
         name: volume_name.to_string(),
         entries,

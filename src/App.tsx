@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { HardDrive, Database, Import, FolderOpen, Loader2, ScanLine, Usb, X, Share2 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   api,
   onVolumeAdded,
@@ -9,6 +10,7 @@ import {
   onIndexProgress,
   type VolumeInfo,
   type IndexProgress,
+  type ScanProgress,
 } from "./lib/ipc";
 import { formatBytes, formatCount } from "./lib/format";
 import { useCatalog } from "./store/catalog";
@@ -32,7 +34,7 @@ function App() {
   // Qué hacer DESPUÉS de escanear (cacheo pesado): el usuario decide. En discos
   // grandes/lentos (exFAT, NAS) conviene desactivar lo que no necesita.
   const [postScan, setPostScan] = useState({ thumbnails: true, videos: true, archives: true });
-  const [scanCount, setScanCount] = useState<number | null>(null);
+  const [scanProg, setScanProg] = useState<ScanProgress | null>(null);
   const [indexProg, setIndexProg] = useState<IndexProgress | null>(null);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanningPath, setScanningPath] = useState<string | null>(null);
@@ -49,7 +51,7 @@ function App() {
       onVolumeRemoved(() => {
         if (catalogPathRef.current) useCatalog.getState().refreshOnlineFromDisk();
       }),
-      onScanProgress((p) => setScanCount(p.count)),
+      onScanProgress((p) => setScanProg(p)),
       onIndexProgress((p) => setIndexProg(p.done >= p.total ? null : p)),
     ];
     // Desactivar el menú contextual del navegador (Inspect/Search…) salvo en
@@ -178,11 +180,11 @@ function App() {
     setError(null);
     if (!(await ensureCatalog())) return;
     setScanningPath(mountPath);
-    setScanCount(0);
+    setScanProg({ count: 0, pct: -1 });
     setStatus(`Escaneando ${name}…`);
     try {
       const r = await api.scanDisk(mountPath, name);
-      setScanCount(null);
+      setScanProg(null);
       await useCatalog.getState().refreshDisks();
       await useCatalog.getState().refreshOnlineFromDisk();
       setStatus(
@@ -224,7 +226,7 @@ function App() {
       setStatus("");
     } finally {
       setScanningPath(null);
-      setScanCount(null);
+      setScanProg(null);
     }
   }
 
@@ -279,16 +281,13 @@ function App() {
         </div>
       )}
 
-      {(scanCount !== null || indexProg) && (
+      {(scanProg || indexProg) && (
         <div className="border-b border-border bg-neutral-900/40 px-4 py-1.5">
           {indexProg ? (
             <ProgressBar progress={indexProg} />
-          ) : (
-            <div className="flex items-center gap-2 text-[11px] text-neutral-400">
-              <Loader2 className="h-3 w-3 animate-spin text-primary" />
-              Escaneando… <span className="font-mono text-neutral-200">{formatCount(scanCount ?? 0)}</span> entradas
-            </div>
-          )}
+          ) : scanProg ? (
+            <ScanProgressBar progress={scanProg} />
+          ) : null}
         </div>
       )}
 
@@ -319,7 +318,15 @@ function App() {
         {lastImport && (
           <span>· {lastImport.disks} discos · {formatCount(lastImport.entries)} entradas</span>
         )}
-        {hasCatalog && <span className="ml-auto">{disks.length} discos en el catálogo</span>}
+        <button
+          onClick={() => openUrl("https://exitmedia.com.ar")}
+          className="ml-auto text-neutral-500 transition-colors hover:text-primary"
+          title="exitmedia.com.ar"
+        >
+          Desarrollado por Pablo Goldberg · <span className="font-medium text-neutral-400">ExitMedia</span>
+        </button>
+        {hasCatalog && <span className="text-neutral-600">·</span>}
+        {hasCatalog && <span>{disks.length} discos en el catálogo</span>}
       </footer>
 
       {scanOpen && (
@@ -327,6 +334,7 @@ function App() {
           onClose={() => setScanOpen(false)}
           onScan={handleScan}
           scanningPath={scanningPath}
+          scanProgress={scanProg}
           options={postScan}
           setOptions={setPostScan}
         />
@@ -362,6 +370,31 @@ function ProgressBar({ progress }: { progress: IndexProgress }) {
           style={{ width: `${pct}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+function ScanProgressBar({ progress }: { progress: ScanProgress }) {
+  const known = progress.pct >= 0;
+  return (
+    <div>
+      <div className="flex items-center justify-between text-[11px] text-neutral-400">
+        <span className="flex items-center gap-1.5">
+          <Loader2 className="h-3 w-3 animate-spin text-primary" />
+          Escaneando…
+        </span>
+        <span className="font-mono text-neutral-300">
+          {formatCount(progress.count)} entradas{known ? ` · ${progress.pct}%` : ""}
+        </span>
+      </div>
+      {known && (
+        <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-neutral-800">
+          <div
+            className="h-full rounded-full bg-primary transition-[width] duration-200"
+            style={{ width: `${progress.pct}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }

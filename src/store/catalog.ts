@@ -56,6 +56,7 @@ interface CatalogState {
 
   runSearch: (query: string) => Promise<void>;
   clearSearch: () => void;
+  reloadCurrent: () => Promise<void>;
 
   addOpenCatalog: (path: string) => void;
   switchCatalog: (path: string) => Promise<void>;
@@ -211,6 +212,23 @@ export const useCatalog = create<CatalogState>((set, get) => ({
 
   clearSearch: () =>
     set({ mode: "browse", searchQuery: "", searchResult: null, parsedFilters: null }),
+
+  // Recarga el listado actual (carpeta en browse, o resultados en search) — p.ej.
+  // tras mover un archivo a la papelera.
+  reloadCurrent: async () => {
+    const s = get();
+    if (s.mode === "search") {
+      await get().runSearch(s.searchQuery);
+    } else if (s.selectedDiskId != null) {
+      const parent = s.breadcrumb[s.breadcrumb.length - 1]?.id ?? null;
+      try {
+        const entries = await api.listChildren(s.selectedDiskId, parent);
+        set({ contentEntries: entries, selectedEntryId: null });
+      } catch (e) {
+        set({ error: String(e) });
+      }
+    }
+  },
 
   addOpenCatalog: (path) =>
     set((s) =>

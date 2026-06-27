@@ -28,6 +28,7 @@ pub fn run() {
             commands::search_entries,
             commands::search_advanced,
             commands::resolve_fs_path,
+            commands::move_to_trash,
             commands::get_thumbnail,
             commands::cache_disk_thumbnails,
             commands::media_tools_available,

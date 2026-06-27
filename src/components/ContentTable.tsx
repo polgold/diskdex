@@ -9,6 +9,7 @@ import {
   FolderSearch,
   ExternalLink,
   Copy,
+  Trash2,
 } from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatDate, formatCount } from "../lib/format";
@@ -25,6 +26,7 @@ interface MenuState {
 /** Menú contextual propio (clic derecho) sobre un ítem. */
 function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) {
   const setError = useCatalog((s) => s.setError);
+  const reloadCurrent = useCatalog((s) => s.reloadCurrent);
 
   useEffect(() => {
     const close = () => onClose();
@@ -71,6 +73,24 @@ function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => voi
         await copyText(p);
       },
     },
+    ...(!menu.isFolder
+      ? [
+          {
+            label: "Mover a la Papelera",
+            icon: <Trash2 className="h-3.5 w-3.5" />,
+            danger: true,
+            fn: async () => {
+              const p = await api.entryPath(menu.id);
+              const ok = window.confirm(
+                `¿Mover a la Papelera?\n\n${p}\n\nSe borra el original del disco (recuperable desde la Papelera) y se quita del catálogo.`
+              );
+              if (!ok) return;
+              await api.moveToTrash(menu.id);
+              await reloadCurrent();
+            },
+          },
+        ]
+      : []),
   ];
 
   // Evitar que el menú se salga de la ventana.
@@ -83,16 +103,23 @@ function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => voi
       style={{ left, top }}
       onClick={(e) => e.stopPropagation()}
     >
-      {items.map((it) => (
-        <button
-          key={it.label}
-          onClick={() => run(it.fn)}
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-neutral-200 transition-colors hover:bg-accent"
-        >
-          {it.icon}
-          {it.label}
-        </button>
-      ))}
+      {items.map((it) => {
+        const danger = (it as { danger?: boolean }).danger;
+        return (
+          <button
+            key={it.label}
+            onClick={() => run(it.fn)}
+            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+              danger
+                ? "text-red-300 hover:bg-red-950/50"
+                : "text-neutral-200 hover:bg-accent"
+            }`}
+          >
+            {it.icon}
+            {it.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

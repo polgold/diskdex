@@ -71,6 +71,8 @@ pub fn ping() -> String {
 #[derive(Clone, Serialize)]
 struct ScanProgress {
     count: u64,
+    /// % estimado (bytes recorridos / usados del volumen). -1 si se desconoce.
+    pct: i32,
 }
 
 /// Avance de una fase de post-procesamiento (miniaturas/videos/archivos).
@@ -808,6 +810,23 @@ pub fn list_tags(state: tauri::State<'_, AppState>) -> Result<Vec<db::TagStat>, 
     db::list_tags(&cat.conn).map_err(|e| e.to_string())
 }
 
+/// Limpieza: mueve el ORIGINAL a la papelera del sistema (requiere disco montado)
+/// y elimina la entrada del catálogo. Devuelve la ruta movida.
+#[tauri::command(async)]
+pub fn move_to_trash(state: tauri::State<'_, AppState>, entry_id: i64) -> Result<String, String> {
+    let path = {
+        let guard = state.catalog.lock().unwrap();
+        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+        resolve_real_path(&cat.conn, entry_id)?
+    };
+    trash::delete(&path).map_err(|e| format!("no se pudo mover a la papelera: {e}"))?;
+    let mut guard = state.catalog.lock().unwrap();
+    if let Some(cat) = guard.as_mut() {
+        let _ = db::delete_entry(&mut cat.conn, entry_id);
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// M3: búsqueda full-text por nombre sobre todo el catálogo.
 #[tauri::command]
 pub fn search_entries(
@@ -864,16 +883,31 @@ pub fn scan_disk(
     // Fingerprint + capacidad/tipo desde el volumen (si coincide con un mount conocido).
     let fingerprint = scan::volume_fingerprint(&root);
     let (capacity, kind) = volume_caps(&mount_path);
+    // Bytes usados del volumen (para estimar % de avance). 0 = desconocido
+    // (p.ej. al escanear una subcarpeta, no un volumen completo).
+    let used_bytes: u64 = scan::list_volumes()
+        .into_iter()
+        .find(|v| v.mount_path == mount_path)
+        .map(|v| v.total_space.saturating_sub(v.available_space))
+        .unwrap_or(0);
 
     let disk = {
         let app = app.clone();
-        scan::scan_volume_cb(&root, &volume_name, &opts, &mut |count| {
-            let _ = app.emit("scan-progress", ScanProgress { count });
+        scan::scan_volume_cb(&root, &volume_name, &opts, &mut |count, bytes| {
+            let pct = if used_bytes > 0 {
+                ((bytes.min(used_bytes)) * 100 / used_bytes).min(99) as i32
+            } else {
+                -1
+            };
+            let _ = app.emit("scan-progress", ScanProgress { count, pct });
         })
         .map_err(|e| format!("error escaneando: {e}"))?
     };
-    // Señal de fin de fase de escaneo (la UI esconde el contador).
-    let _ = app.emit("scan-progress", ScanProgress { count: disk.entries.len() as u64 });
+    // Señal de fin de fase de escaneo.
+    let _ = app.emit(
+        "scan-progress",
+        ScanProgress { count: disk.entries.len() as u64, pct: 100 },
+    );
 
     let mut guard = state.catalog.lock().unwrap();
     let cat = guard.as_mut().ok_or("no hay catálogo abierto: creá o abrí uno antes de escanear")?;

@@ -183,6 +183,8 @@ export const api = {
 
   // M6 — resolver ruta real (si el disco está montado)
   resolveFsPath: (entryId: number) => invoke<string>("resolve_fs_path", { entryId }),
+  // Limpieza — mover el original a la papelera y sacarlo del catálogo
+  moveToTrash: (entryId: number) => invoke<string>("move_to_trash", { entryId }),
 
   // Thumbnails — preview cacheado (offline) o generado on-demand (data URL PNG)
   getThumbnail: (entryId: number, max?: number) =>
@@ -263,6 +265,7 @@ export const onVolumeRemoved = (cb: (v: VolumeInfo) => void): Promise<UnlistenFn
 // Progreso de escaneo / indexado (Fase B).
 export interface ScanProgress {
   count: number;
+  pct: number; // -1 si se desconoce el total
 }
 export interface IndexProgress {
   phase: "thumbnails" | "videos" | "archives";

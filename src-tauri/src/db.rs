@@ -430,6 +430,30 @@ fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<EntryRow> {
     })
 }
 
+/// Elimina una entrada del catálogo (tras mover el original a la papelera).
+/// Limpia FTS y tablas derivadas. Pensado para archivos (no subárboles).
+pub fn delete_entry(conn: &mut Connection, entry_id: i64) -> DbResult<()> {
+    let tx = conn.transaction()?;
+    // Quitar del índice FTS externo antes de borrar la fila.
+    tx.execute(
+        "INSERT INTO entries_fts(entries_fts, rowid, name) \
+         SELECT 'delete', id, name FROM entries WHERE id = ?1",
+        params![entry_id],
+    )?;
+    for sql in [
+        "DELETE FROM thumbnails WHERE entry_id = ?1",
+        "DELETE FROM entry_tags WHERE entry_id = ?1",
+        "DELETE FROM video_meta WHERE entry_id = ?1",
+        "DELETE FROM video_frames WHERE entry_id = ?1",
+        "DELETE FROM archive_entries WHERE entry_id = ?1",
+        "DELETE FROM entries WHERE id = ?1",
+    ] {
+        tx.execute(sql, params![entry_id])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Edita el comentario de una entrada (M7).
 pub fn set_entry_comment(conn: &Connection, entry_id: i64, comment: Option<&str>) -> DbResult<()> {
     conn.execute(
@@ -1599,6 +1623,24 @@ mod tests {
         assert_eq!(archive_entry_count(&conn, zip).unwrap(), 3);
         // Ya no pendiente.
         assert!(archive_files_without_index(&conn, disk_id, &["zip"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_entry_removes_row_and_fts() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk()]).unwrap();
+        let id: i64 = conn.query_row("SELECT id FROM entries WHERE name='C0001.MP4'", [], |r| r.get(0)).unwrap();
+        add_entry_tag(&conn, id, "borrar").unwrap();
+        store_thumbnail(&conn, id, &[1, 2, 3], 4, 4).unwrap();
+
+        delete_entry(&mut conn, id).unwrap();
+
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM entries WHERE id=?1", params![id], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0);
+        // No quedó en el FTS ni en derivadas.
+        assert_eq!(search(&conn, "C0001", 10).unwrap().total, 0);
+        let th: i64 = conn.query_row("SELECT COUNT(*) FROM thumbnails WHERE entry_id=?1", params![id], |r| r.get(0)).unwrap();
+        assert_eq!(th, 0);
     }
 
     #[test]

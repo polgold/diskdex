@@ -54,6 +54,9 @@ zip = "2"
 sevenz-rust = "0.6"
 unrar = "0.5"
 
+# Mover a la papelera del sistema (limpieza de discos), multiplataforma.
+trash = "5"
+
 # Utilidades.
 anyhow = "1"
 thiserror = "2"

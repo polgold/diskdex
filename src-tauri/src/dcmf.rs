@@ -40,6 +40,12 @@ pub struct DcmfEntry {
     /// Unix seconds (0 = desconocida).
     pub created: i64,
     pub modified: i64,
+    /// Identidad física del archivo (Unix: st_dev / st_ino). Permite reconocer el
+    /// MISMO archivo alcanzable por varias rutas (firmlinks de macOS, hardlinks) y
+    /// no contarlo como "duplicado". `None` en archivos .dcmf importados (el formato
+    /// de DiskCatalogMaker no la trae) y en plataformas sin inodes (Windows).
+    pub device_id: Option<u64>,
+    pub inode: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -267,6 +273,9 @@ pub fn import_dcmf(buf: &[u8]) -> Vec<DcmfDisk> {
                 size_physical,
                 created,
                 modified,
+                // El formato DiskCatalogMaker no expone dev/inode.
+                device_id: None,
+                inode: None,
             });
         }
 

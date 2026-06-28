@@ -277,6 +277,11 @@ fn apply_migrations(conn: &Connection) -> DbResult<()> {
         "ALTER TABLE entries ADD COLUMN camera_make  TEXT",
         "ALTER TABLE entries ADD COLUMN camera_model TEXT",
         "ALTER TABLE entries ADD COLUMN light_phase  TEXT",
+        // Identidad física del archivo (st_dev/st_ino) para no contar el MISMO
+        // archivo como duplicado cuando es alcanzable por varias rutas (firmlinks
+        // de macOS, hardlinks). NULL en catálogos viejos / .dcmf importados.
+        "ALTER TABLE entries ADD COLUMN device_id    INTEGER",
+        "ALTER TABLE entries ADD COLUMN inode        INTEGER",
         "ALTER TABLE disks   ADD COLUMN cloud_provider TEXT",
         "ALTER TABLE disks   ADD COLUMN cloud_root     TEXT",
     ];
@@ -293,7 +298,8 @@ fn apply_migrations(conn: &Connection) -> DbResult<()> {
     // idx_entries_hash sirve también a futuro para duplicados entre discos (mismo hash).
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_entries_hash  ON entries(content_hash);
-         CREATE INDEX IF NOT EXISTS idx_entries_place ON entries(gps_place);",
+         CREATE INDEX IF NOT EXISTS idx_entries_place ON entries(gps_place);
+         CREATE INDEX IF NOT EXISTS idx_entries_inode ON entries(device_id, inode);",
     )?;
     Ok(())
 }
@@ -453,10 +459,11 @@ pub fn load_disk_tree(
     };
 
     let mut stmt = conn.prepare(
-        "SELECT id, parent_id, name, is_folder, size_logical, size_physical, created_at, modified_at \
+        "SELECT id, parent_id, name, is_folder, size_logical, size_physical, created_at, modified_at, \
+                device_id, inode \
          FROM entries WHERE disk_id = ?1 ORDER BY id",
     )?;
-    type Raw = (i64, Option<i64>, String, bool, i64, i64, Option<i64>, Option<i64>);
+    type Raw = (i64, Option<i64>, String, bool, i64, i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
     let raw: Vec<Raw> = stmt
         .query_map(params![disk_id], |r| {
             Ok((
@@ -468,6 +475,8 @@ pub fn load_disk_tree(
                 r.get::<_, i64>(5)?,
                 r.get::<_, Option<i64>>(6)?,
                 r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<i64>>(8)?,
+                r.get::<_, Option<i64>>(9)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -478,7 +487,7 @@ pub fn load_disk_tree(
     }
     let entries = raw
         .iter()
-        .map(|(_id, parent_id, name, is_folder, sl, sp, c, m)| DcmfEntry {
+        .map(|(_id, parent_id, name, is_folder, sl, sp, c, m, dev, ino)| DcmfEntry {
             name: name.clone(),
             parent: parent_id.and_then(|p| idx.get(&p).copied()).unwrap_or(-1),
             is_folder: *is_folder,
@@ -487,6 +496,8 @@ pub fn load_disk_tree(
             size_physical: *sp as u64,
             created: c.unwrap_or(0),
             modified: m.unwrap_or(0),
+            device_id: dev.map(|v| v as u64),
+            inode: ino.map(|v| v as u64),
         })
         .collect();
     Ok(Some(DcmfDisk { name, entries }))
@@ -682,8 +693,9 @@ pub fn ingest_scanned(
         let mut stmt = tx.prepare(
             "INSERT INTO entries
              (disk_id, parent_id, name, is_folder, size_logical, size_physical, created_at, modified_at, ext,
-              content_hash, hashed_at, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, light_phase)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              content_hash, hashed_at, gps_lat, gps_lon, gps_place, captured_at, camera_make, camera_model, light_phase,
+              device_id, inode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         )?;
         let now = now_secs();
         for (k, e) in disk.entries.iter().enumerate() {
@@ -744,6 +756,8 @@ pub fn ingest_scanned(
                 camera_make,
                 camera_model,
                 light_phase,
+                e.device_id.map(|v| v as i64),
+                e.inode.map(|v| v as i64),
             ])?;
             if k == 0 {
                 base = tx.last_insert_rowid();
@@ -1953,19 +1967,45 @@ pub fn duplicates(conn: &Connection, min_size: i64, limit: i64) -> DbResult<Vec<
         .collect::<Result<_, _>>()?;
 
     let mut out = Vec::with_capacity(groups.len());
-    for (name, size, count) in groups {
+    for (name, size, _count) in groups {
         let mut istmt = conn.prepare(
-            "SELECT e.id, e.name, d.name, e.size_logical FROM entries e JOIN disks d ON d.id = e.disk_id \
+            "SELECT e.id, e.name, d.name, e.disk_id, e.size_logical, e.device_id, e.inode \
+             FROM entries e JOIN disks d ON d.id = e.disk_id \
              WHERE e.is_folder = 0 AND e.name = ?1 AND e.size_logical = ?2 LIMIT 100",
         )?;
-        let raw: Vec<(i64, String, String, i64)> = istmt
-            .query_map(params![name, size], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        type DupRaw = (i64, String, String, i64, i64, Option<i64>, Option<i64>);
+        let raw: Vec<DupRaw> = istmt
+            .query_map(params![name, size], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })?
             .collect::<Result<_, _>>()?;
+        // Colapsar el MISMO archivo físico contado varias veces: no es espacio
+        // "recuperable" real. Clave de identidad:
+        //   - si hay (device_id, inode) → identidad física exacta, incluso entre
+        //     discos escaneados en la misma sesión (firmlinks de macOS, hardlinks).
+        //   - si no (catálogo viejo / .dcmf) → fallback textual ACOTADO AL MISMO
+        //     disco: normalizar el alias `/System/Volumes/Data` para casar
+        //     `…/System/Volumes/Data/Volumes/Y` con `…/Volumes/Y`. Acotarlo por
+        //     disk_id evita colapsar dos discos distintos que comparten nombre de
+        //     volumen (misma ruta textual reconstruida) y SÍ son copias reales.
+        let mut seen = std::collections::HashSet::new();
         let mut items = Vec::with_capacity(raw.len());
-        for (id, n, disk_name, sz) in raw {
-            items.push(BigFile { id, name: n, disk_name, size_logical: sz, path: entry_path(conn, id)? });
+        for (id, n, disk_name, disk_id, sz, dev, ino) in raw {
+            let path = entry_path(conn, id)?;
+            let key = match (dev, ino) {
+                (Some(d), Some(i)) => format!("ino:{d}:{i}"),
+                _ => format!("path:{disk_id}:{}", path.replace("/System/Volumes/Data", "")),
+            };
+            if !seen.insert(key) {
+                continue; // ya vimos este archivo físico
+            }
+            items.push(BigFile { id, name: n, disk_name, size_logical: sz, path });
         }
-        out.push(DupGroup { name, size, count, wasted: (count - 1) * size, items });
+        let count = items.len() as i64;
+        // Si tras colapsar queda 1 solo, el "grupo" era puro artefacto de alias.
+        if count > 1 {
+            out.push(DupGroup { name, size, count, wasted: (count - 1) * size, items });
+        }
     }
     Ok(out)
 }
@@ -2260,10 +2300,10 @@ mod tests {
         DcmfDisk {
             name: "SF28".into(),
             entries: vec![
-                DcmfEntry { name: "SF28".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
-                DcmfEntry { name: "CLIP".into(), parent: 0, is_folder: true, is_volume: false, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
-                DcmfEntry { name: "C0001.MP4".into(), parent: 1, is_folder: false, is_volume: false, size_logical: 4_563_402_752, size_physical: 4_563_406_848, created: 1_685_577_600, modified: 1_685_581_200 },
-                DcmfEntry { name: "B-ROLL.MOV".into(), parent: 1, is_folder: false, is_volume: false, size_logical: 1_000_000_000, size_physical: 1_000_001_024, created: 0, modified: 0 },
+                DcmfEntry { name: "SF28".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0, device_id: None, inode: None },
+                DcmfEntry { name: "CLIP".into(), parent: 0, is_folder: true, is_volume: false, size_logical: 0, size_physical: 0, created: 0, modified: 0, device_id: None, inode: None },
+                DcmfEntry { name: "C0001.MP4".into(), parent: 1, is_folder: false, is_volume: false, size_logical: 4_563_402_752, size_physical: 4_563_406_848, created: 1_685_577_600, modified: 1_685_581_200, device_id: None, inode: None },
+                DcmfEntry { name: "B-ROLL.MOV".into(), parent: 1, is_folder: false, is_volume: false, size_logical: 1_000_000_000, size_physical: 1_000_001_024, created: 0, modified: 0, device_id: None, inode: None },
             ],
         }
     }
@@ -2518,6 +2558,41 @@ mod tests {
         assert_eq!(c0001.count, 2);
         assert_eq!(c0001.wasted as u64, 4_563_402_752);
         assert_eq!(c0001.items.len(), 2);
+    }
+
+    #[test]
+    fn duplicates_collapse_same_physical_file_by_inode() {
+        let mut conn = open_in_memory().unwrap();
+        let ent = |name: &str, parent: i32, is_folder: bool, is_volume: bool,
+                   size: u64, dev: Option<u64>, ino: Option<u64>| DcmfEntry {
+            name: name.into(), parent, is_folder, is_volume,
+            size_logical: size, size_physical: size, created: 0, modified: 0,
+            device_id: dev, inode: ino,
+        };
+        // Un solo disco con DOS rutas (carpetas A y B) hacia archivos:
+        //  - CLONE.MOV: MISMO (dev, inode) por ambas rutas → mismo archivo físico.
+        //  - REAL.MOV : mismo nombre+tamaño pero inodes distintos → 2 copias reales.
+        let disk = DcmfDisk {
+            name: "HD".into(),
+            entries: vec![
+                ent("HD", -1, true, true, 0, None, None),       // 0 raíz
+                ent("A", 0, true, false, 0, None, None),         // 1
+                ent("B", 0, true, false, 0, None, None),         // 2
+                ent("CLONE.MOV", 1, false, false, 5000, Some(7), Some(99)),  // 3
+                ent("CLONE.MOV", 2, false, false, 5000, Some(7), Some(99)),  // 4 (= 3)
+                ent("REAL.MOV", 1, false, false, 6000, Some(7), Some(100)),  // 5
+                ent("REAL.MOV", 2, false, false, 6000, Some(7), Some(101)),  // 6
+            ],
+        };
+        ingest_scanned(&mut conn, &disk, Some("UUID-HD"), "ssd", None, "/", None).unwrap();
+
+        let dups = duplicates(&conn, 1, 100).unwrap();
+        // CLONE.MOV es el mismo archivo físico por dos rutas → NO es duplicado.
+        assert!(dups.iter().all(|g| g.name != "CLONE.MOV"));
+        // REAL.MOV sí: dos archivos físicos distintos con igual nombre+tamaño.
+        let real = dups.iter().find(|g| g.name == "REAL.MOV").unwrap();
+        assert_eq!(real.count, 2);
+        assert_eq!(real.items.len(), 2);
     }
 
     #[test]
@@ -2958,10 +3033,12 @@ mod tests {
         let folder = |name: &str, parent: i32| DcmfEntry {
             name: name.into(), parent, is_folder: true, is_volume: parent < 0,
             size_logical: 0, size_physical: 0, created: 0, modified: 0,
+            device_id: None, inode: None,
         };
         let file = |name: &str, parent: i32, size: u64| DcmfEntry {
             name: name.into(), parent, is_folder: false, is_volume: false,
             size_logical: size, size_physical: size, created: 0, modified: 0,
+            device_id: None, inode: None,
         };
 
         // SOURCE: DCIM/{A.mov(hashA), B.mov(hashB), C.mov(sin hash, 50B)}

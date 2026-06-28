@@ -112,6 +112,20 @@ fn physical_size(meta: &fs::Metadata) -> u64 {
     meta.len()
 }
 
+/// Identidad física del archivo: (st_dev, st_ino) en Unix. Dos rutas con la misma
+/// pareja apuntan al MISMO archivo en disco (firmlinks de macOS, hardlinks), así la
+/// detección de duplicados no las cuenta como copias. `None` donde no aplica (Windows).
+#[cfg(unix)]
+fn file_identity(meta: &fs::Metadata) -> (Option<u64>, Option<u64>) {
+    use std::os::unix::fs::MetadataExt;
+    (Some(meta.dev()), Some(meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_meta: &fs::Metadata) -> (Option<u64>, Option<u64>) {
+    (None, None)
+}
+
 /// En Windows, tamaño comprimido/asignado real por ruta.
 #[cfg(windows)]
 fn physical_size_path(path: &Path, logical: u64) -> u64 {
@@ -147,6 +161,28 @@ pub fn scan_volume(root: &Path, volume_name: &str, opts: &ScanOptions) -> std::i
     scan_volume_cb(root, volume_name, opts, &mut |_, _| {}, &|| false)
 }
 
+/// Directorios "pseudo-montaje" de macOS que NO deben recorrerse al escanear
+/// desde la raíz `/`: son alias/firmlinks o puntos de montaje que re-exponen el
+/// MISMO dato físico por otro camino (`/Volumes` y `/System/Volumes/Data` apuntan
+/// a volúmenes ya visibles vía firmlink, y los discos externos se escanean por
+/// separado). Sin saltarlos, el mismo archivo se indexa 2-3 veces y termina
+/// reportado como "duplicado" recuperable cuando no lo es. Sólo se evalúa contra
+/// hijos encontrados durante el recorrido, nunca contra el root elegido, así que
+/// escanear directamente `/Volumes/MiDisco` sigue funcionando.
+#[cfg(target_os = "macos")]
+fn is_macos_pseudo_mount(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/Volumes")
+            | Some("/System/Volumes")
+            | Some("/dev")
+            | Some("/net")
+            | Some("/home")
+            | Some("/.vol")
+            | Some("/private/var/vm")
+    )
+}
+
 /// Igual que `scan_volume` pero invoca `progress(entradas, bytes_lógicos)` de
 /// forma periódica durante el recorrido (para reportar avance a la UI) y consulta
 /// `cancel()` para abortar a pedido. Si se cancela, devuelve `ErrorKind::Interrupted`
@@ -172,6 +208,8 @@ pub fn scan_volume_cb(
         size_physical: 0,
         created: st_to_unix(root_meta.created()),
         modified: st_to_unix(root_meta.modified()),
+        device_id: None,
+        inode: None,
     });
 
     // Pila de carpetas por visitar: (ruta, índice del nodo padre).
@@ -213,12 +251,23 @@ pub fn scan_volume_cb(
             let is_symlink = meta.file_type().is_symlink();
             let is_dir = meta.is_dir() && !is_symlink;
 
+            // macOS: no descender por alias/firmlinks que re-exponen el mismo dato
+            // físico (evita indexar el mismo archivo 2-3 veces → falsos duplicados).
+            #[cfg(target_os = "macos")]
+            if is_dir && is_macos_pseudo_mount(&path) {
+                continue;
+            }
+
             let (size_logical, size_physical) = if is_dir || is_symlink {
                 (0, 0)
             } else {
                 let logical = meta.len();
                 (logical, physical_size_path(&path, physical_size(&meta)))
             };
+            // Identidad física sólo para archivos reales (la dedup de duplicados
+            // ignora carpetas y symlinks no tienen contenido propio que duplicar).
+            let (device_id, inode) =
+                if is_dir || is_symlink { (None, None) } else { file_identity(&meta) };
 
             let idx = entries.len();
             entries.push(DcmfEntry {
@@ -230,6 +279,8 @@ pub fn scan_volume_cb(
                 size_physical,
                 created: st_to_unix(meta.created()),
                 modified: st_to_unix(meta.modified()),
+                device_id,
+                inode,
             });
 
             bytes_acc = bytes_acc.saturating_add(size_logical);
@@ -472,6 +523,9 @@ fn splice_children(
             size_physical: oe.size_physical,
             created: oe.created,
             modified: oe.modified,
+            // Subárbol reutilizado del catálogo viejo: conservar su identidad física.
+            device_id: oe.device_id,
+            inode: oe.inode,
         });
         if !oe.is_folder {
             bytes = bytes.saturating_add(oe.size_logical);
@@ -527,6 +581,8 @@ pub fn scan_volume_incremental(
         size_physical: 0,
         created: st_to_unix(root_meta.created()),
         modified: st_to_unix(root_meta.modified()),
+        device_id: None,
+        inode: None,
     });
 
     // Pila: (ruta abs, índice del padre en `entries`, ruta relativa).
@@ -563,6 +619,14 @@ pub fn scan_volume_incremental(
             };
             let is_symlink = meta.file_type().is_symlink();
             let is_dir = meta.is_dir() && !is_symlink;
+
+            // macOS: no descender por alias/firmlinks que re-exponen el mismo dato
+            // físico (mismo criterio que `scan_volume_cb` → no falsos duplicados).
+            #[cfg(target_os = "macos")]
+            if is_dir && is_macos_pseudo_mount(&path) {
+                continue;
+            }
+
             let child_rel = if dir_rel.is_empty() {
                 name.clone()
             } else {
@@ -591,6 +655,8 @@ pub fn scan_volume_incremental(
                     size_physical: 0,
                     created: st_to_unix(meta.created()),
                     modified: live_mtime,
+                    device_id: None,
+                    inode: None,
                 });
 
                 if let Some(oid) = reuse {
@@ -608,6 +674,7 @@ pub fn scan_volume_incremental(
                     let logical = meta.len();
                     (logical, physical_size_path(&path, physical_size(&meta)))
                 };
+                let (device_id, inode) = if is_symlink { (None, None) } else { file_identity(&meta) };
                 entries.push(DcmfEntry {
                     name,
                     parent: parent_idx as i32,
@@ -617,6 +684,8 @@ pub fn scan_volume_incremental(
                     size_physical,
                     created: st_to_unix(meta.created()),
                     modified: st_to_unix(meta.modified()),
+                    device_id,
+                    inode,
                 });
                 bytes_acc = bytes_acc.saturating_add(size_logical);
             }

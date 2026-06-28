@@ -274,6 +274,10 @@ impl WhisperEngine {
         let mut tokens = vec![self.sot, lang_token, self.transcribe, self.no_ts];
         let sample_len = self.model.config.max_target_positions / 2;
         let mut sum_logprob = 0f64;
+        // Tokens GENERADOS (sin contar los 4 de prompt). El promedio se hace sobre
+        // estos, no sobre tokens.len(): meter los de prompt en el denominador inflaba
+        // avg_logprob hacia 0 y hacía sub-disparar el fallback por temperatura.
+        let mut gen_tokens = 0usize;
         let mut no_speech_prob = 0f64;
         for i in 0..sample_len {
             let tokens_t = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
@@ -310,13 +314,15 @@ impl WhisperEngine {
                 .i(next as usize)?
                 .to_scalar::<f32>()? as f64;
             tokens.push(next);
+            // Contar el logprob de ESTE token (incluido el EOT) antes de cortar.
+            sum_logprob += prob.ln();
+            gen_tokens += 1;
             if next == self.eot || tokens.len() > self.model.config.max_target_positions {
                 break;
             }
-            sum_logprob += prob.ln();
         }
         let text = self.tokenizer.decode(&tokens, true).map_err(anyhow::Error::msg)?;
-        let avg_logprob = sum_logprob / tokens.len().max(1) as f64;
+        let avg_logprob = sum_logprob / gen_tokens.max(1) as f64;
         Ok((text, avg_logprob, no_speech_prob))
     }
 

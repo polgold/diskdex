@@ -299,7 +299,7 @@ export const api = {
     invoke<ImportSummary>("import_dcmf", { dcmfPath, catalogPath }),
   dcmfDiskNames: (dcmfPath: string) => invoke<string[]>("dcmf_disk_names", { dcmfPath }),
   importDcmfMerge: (dcmfPath: string, replace: boolean) =>
-    invoke<ImportSummary>("import_dcmf_merge", { dcmfPath, replace }),
+    invoke<ImportSummary>("import_dcmf_merge", { dcmfPath, replace: replace === true }),
 
   openCatalog: (catalogPath: string) => invoke<void>("open_catalog", { catalogPath }),
 
@@ -436,6 +436,9 @@ export interface SemanticItem extends SearchItem {
   frame_ts: number | null;
   /** Fragmento de la transcripción donde matchea (Fase 4); null para hits visuales. */
   snippet?: string | null;
+  /** Ubicación resuelta del GPS (C1) y fase de luz (C2), para post-filtrar place/light. */
+  gps_place?: string | null;
+  light_phase?: string | null;
 }
 
 // Progreso del indexado semántico / transcripción. `total = -1` mientras carga el modelo.

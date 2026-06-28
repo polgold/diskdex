@@ -201,15 +201,24 @@ pub fn start(catalog_path: PathBuf, config: AgentConfig) -> Result<AgentHandle, 
         .route("/v1/transfers", post(transfers))
         .with_state(inner.clone());
 
-    // Bind sincrónico para conocer la addr real antes de devolver.
-    let listener = tauri::async_runtime::block_on(async {
-        tokio::net::TcpListener::bind(&config.bind).await
-    })
-    .map_err(|e| format!("agente: no pudo escuchar en {}: {e}", config.bind))?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?.to_string();
+    // Bind sincrónico (std, sin runtime) para conocer la addr real antes de
+    // devolver. OJO: no usar `block_on` acá — este comando ya corre dentro del
+    // runtime tokio (`#[tauri::command(async)]`), y `block_on` anidado paniquea.
+    let std_listener = std::net::TcpListener::bind(&config.bind)
+        .map_err(|e| format!("agente: no pudo escuchar en {}: {e}", config.bind))?;
+    std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let addr = std_listener.local_addr().map_err(|e| e.to_string())?.to_string();
 
     let (tx, rx) = oneshot::channel::<()>();
     tauri::async_runtime::spawn(async move {
+        // `from_std` requiere contexto de runtime: acá ya estamos dentro de la task.
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("agente: no pudo adoptar el socket: {e}");
+                return;
+            }
+        };
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = rx.await;

@@ -29,13 +29,15 @@ Esquema:
   "after_year": number|null,
   "before_year": number|null,
   "kind": "file"|"folder"|null,
+  "language": string|null,  // idioma HABLADO pedido para filtrar transcripciones, código ISO-2: es, en, pt, fr, it, de (ej "en español"→es). null si no se menciona
   "concept": string|null    // concepto VISUAL residual para buscar por contenido (objetos/escenas: "gente en la playa", "perros"), o null si no hay
 }
 
 Reglas:
 - Un lugar geográfico va en "place", NO en "concept".
 - Momentos del día (atardecer, amanecer, noche) van en "light", NO en "concept".
-- "concept" es solo para contenido visual que no sea lugar ni momento del día.
+- Un idioma hablado ("en español", "in english") va en "language" como código ISO-2, NO en "concept".
+- "concept" es solo para contenido visual que no sea lugar, momento del día ni idioma.
 - Si un campo no aplica, ponelo en null (o [] para categories).`;
 
 interface ClaudeJson {
@@ -47,6 +49,7 @@ interface ClaudeJson {
   after_year?: number | null;
   before_year?: number | null;
   kind?: "file" | "folder" | null;
+  language?: string | null;
   concept?: string | null;
 }
 
@@ -73,7 +76,8 @@ export function claudeJsonToNLQuery(j: ClaudeJson): NLQuery {
     filters.modified_before = Math.floor(Date.UTC(j.before_year, 11, 31, 23, 59, 59) / 1000);
   if (j.kind === "file" || j.kind === "folder") filters.kind = j.kind;
   const concept = (j.concept ?? "").toString().trim();
-  return { concept, filters };
+  const lang = j.language && String(j.language).trim() ? String(j.language).trim().toLowerCase() : undefined;
+  return { concept, filters, lang };
 }
 
 /** Pide a Claude que interprete la frase. Lanza si la API falla (el caller degrada). */

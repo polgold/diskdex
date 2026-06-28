@@ -237,17 +237,17 @@ CREATE TABLE IF NOT EXISTS devices (
 
 /// Abre (o crea) un catálogo y garantiza el esquema.
 pub fn open(path: &Path) -> DbResult<Connection> {
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
-    apply_migrations(&conn)?;
+    apply_migrations(&mut conn)?;
     Ok(conn)
 }
 
 /// Abre un catálogo en memoria (para tests).
 pub fn open_in_memory() -> DbResult<Connection> {
-    let conn = Connection::open_in_memory()?;
+    let mut conn = Connection::open_in_memory()?;
     conn.execute_batch(SCHEMA)?;
-    apply_migrations(&conn)?;
+    apply_migrations(&mut conn)?;
     Ok(conn)
 }
 
@@ -265,7 +265,7 @@ pub fn open_in_memory() -> DbResult<Connection> {
 ///   metadata de cámara y búsqueda por ubicación ("clips de Jujuy").
 /// - `entries.cloud_state` → 0=local, 1=placeholder solo-en-la-nube.
 /// - `disks.cloud_provider/cloud_root` → carpeta sincronizada como disco cloud.
-fn apply_migrations(conn: &Connection) -> DbResult<()> {
+fn apply_migrations(conn: &mut Connection) -> DbResult<()> {
     const ADD_COLUMNS: &[&str] = &[
         "ALTER TABLE entries ADD COLUMN content_hash TEXT",
         "ALTER TABLE entries ADD COLUMN hashed_at    INTEGER",
@@ -285,8 +285,13 @@ fn apply_migrations(conn: &Connection) -> DbResult<()> {
         "ALTER TABLE disks   ADD COLUMN cloud_provider TEXT",
         "ALTER TABLE disks   ADD COLUMN cloud_root     TEXT",
     ];
+    // Todo en UNA transacción: o se aplican todas las columnas+índices o ninguna. Si
+    // un ALTER falla por algo que NO sea "columna duplicada" (disco lleno, etc.), el
+    // `?` retorna y la transacción hace rollback al dropearse → nunca queda un esquema
+    // a medio migrar (que rompería SELECTs de columnas faltantes en search_advanced).
+    let tx = conn.transaction()?;
     for stmt in ADD_COLUMNS {
-        match conn.execute(stmt, []) {
+        match tx.execute(stmt, []) {
             Ok(_) => {}
             // La columna ya existe (catálogo ya migrado): no es un error real.
             Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
@@ -296,11 +301,12 @@ fn apply_migrations(conn: &Connection) -> DbResult<()> {
     }
     // Índices nuevos. Idempotentes y deben ir DESPUÉS de crear las columnas.
     // idx_entries_hash sirve también a futuro para duplicados entre discos (mismo hash).
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_entries_hash  ON entries(content_hash);
          CREATE INDEX IF NOT EXISTS idx_entries_place ON entries(gps_place);
          CREATE INDEX IF NOT EXISTS idx_entries_inode ON entries(device_id, inode);",
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1403,6 +1409,12 @@ pub struct SemanticItem {
     /// Fragmento de la transcripción donde matchea (Fase 4); None para hits visuales.
     #[serde(default)]
     pub snippet: Option<String>,
+    /// Ubicación resuelta del GPS (C1) y fase de luz (C2). Se incluyen para que el
+    /// cliente pueda post-filtrar por place/light en el camino semántico (applyNLFilters).
+    #[serde(default)]
+    pub gps_place: Option<String>,
+    #[serde(default)]
+    pub light_phase: Option<String>,
 }
 
 fn vec_to_blob(v: &[f32]) -> Vec<u8> {
@@ -1570,39 +1582,106 @@ pub fn video_embedding_candidates(
 
 /// Construye `SearchItem`s (con disco + ruta) para una lista de ids, preservando
 /// el orden de entrada (el ranking lo decide el caller). Ids inexistentes se omiten.
+/// Hace 2 queries en total (filas + rutas en batch), no 1+N como antes: para 500
+/// resultados eso eran 500 CTE recursivos re-preparados, ahora es uno solo.
 pub fn search_items_by_ids(conn: &Connection, ids: &[i64]) -> DbResult<Vec<SearchItem>> {
-    let mut out = Vec::with_capacity(ids.len());
-    let mut stmt = conn.prepare(
+    use std::collections::HashMap;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
         "SELECT e.id, e.disk_id, d.name, e.name, e.is_folder, e.size_logical, e.modified_at \
-         FROM entries e JOIN disks d ON d.id = e.disk_id WHERE e.id = ?1",
-    )?;
+         FROM entries e JOIN disks d ON d.id = e.disk_id WHERE e.id IN ({ph})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows_map: HashMap<i64, SearchItem> = HashMap::new();
+    let mapped = stmt.query_map(params_from_iter(ids.iter()), |r| {
+        Ok(SearchItem {
+            id: r.get(0)?,
+            disk_id: r.get(1)?,
+            disk_name: r.get(2)?,
+            name: r.get(3)?,
+            is_folder: r.get::<_, i64>(4)? != 0,
+            size_logical: r.get(5)?,
+            modified_at: r.get(6)?,
+            path: String::new(),
+        })
+    })?;
+    for row in mapped {
+        let it = row?;
+        rows_map.insert(it.id, it);
+    }
+    // Rutas de todas las entradas en una sola query.
+    let paths = entry_paths_for_ids(conn, ids)?;
+    let mut out = Vec::with_capacity(ids.len());
     for &id in ids {
-        let row = stmt
-            .query_map(params![id], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)? != 0,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, Option<i64>>(6)?,
-                ))
-            })?
-            .next();
-        if let Some(Ok((id, disk_id, disk_name, name, is_folder, size_logical, modified_at))) = row {
-            let path = entry_path(conn, id)?;
-            out.push(SearchItem {
-                id,
-                disk_id,
-                disk_name,
-                name,
-                is_folder,
-                size_logical,
-                modified_at,
-                path,
-            });
+        if let Some(mut it) = rows_map.remove(&id) {
+            it.path = paths.get(&id).cloned().unwrap_or_default();
+            out.push(it);
         }
+    }
+    Ok(out)
+}
+
+/// Resuelve la ruta completa de varias entradas en UNA query: un CTE recursivo que
+/// sube los ancestros de TODOS los ids a la vez (cada fila lleva su `root`). Evita
+/// el N+1 de llamar `entry_path` por id.
+fn entry_paths_for_ids(conn: &Connection, ids: &[i64]) -> DbResult<std::collections::HashMap<i64, String>> {
+    use std::collections::HashMap;
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "WITH RECURSIVE anc(root, id, parent_id, name, depth) AS (
+             SELECT id, id, parent_id, name, 0 FROM entries WHERE id IN ({ph})
+             UNION ALL
+             SELECT anc.root, e.id, e.parent_id, e.name, anc.depth + 1
+             FROM entries e JOIN anc ON e.id = anc.parent_id
+         )
+         SELECT root, name, depth FROM anc ORDER BY root, depth DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(ids.iter()), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    // `depth DESC` → el ancestro más alto primero, la entrada misma al final.
+    let mut parts: HashMap<i64, Vec<String>> = HashMap::new();
+    for row in rows {
+        let (root, name) = row?;
+        parts.entry(root).or_default().push(name);
+    }
+    Ok(parts
+        .into_iter()
+        .map(|(root, names)| (root, format!("/{}", names.join("/"))))
+        .collect())
+}
+
+/// Devuelve gps_place + light_phase de una lista de ids (batch), para post-filtrar
+/// place/light en el camino semántico. Ids sin metadata quedan con (None, None).
+pub fn places_for_ids(
+    conn: &Connection,
+    ids: &[i64],
+) -> DbResult<std::collections::HashMap<i64, (Option<String>, Option<String>)>> {
+    use std::collections::HashMap;
+    let mut out = HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT id, gps_place, light_phase FROM entries WHERE id IN ({ph})");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(ids.iter()), |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, p, l) = row?;
+        out.insert(id, (p, l));
     }
     Ok(out)
 }
@@ -1610,25 +1689,31 @@ pub fn search_items_by_ids(conn: &Connection, ids: &[i64]) -> DbResult<Vec<Searc
 // ---------- Transcripciones (IA Fase 4, Whisper) ----------
 
 /// Guarda (o reemplaza) la transcripción de una entrada y la reindexa en el FTS.
+/// Todo en UNA transacción: el FTS standalone (rowid = entry_id) se mantiene en sync
+/// con `transcripts` aunque el proceso muera o aparezca "database is locked" — si no,
+/// quedaría desincronizado para siempre (transcript_candidates saltea entries que ya
+/// tienen fila en `transcripts`, así que re-correr no lo arregla).
 pub fn store_transcript(
-    conn: &Connection,
+    conn: &mut Connection,
     entry_id: i64,
     model: &str,
     lang: Option<&str>,
     text: &str,
     created_at: i64,
 ) -> DbResult<()> {
-    conn.execute(
+    let tx = conn.transaction()?;
+    tx.execute(
         "INSERT OR REPLACE INTO transcripts (entry_id, model, lang, text, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![entry_id, model, lang, text, created_at],
     )?;
     // FTS standalone (rowid = entry_id): borrar la fila vieja y reinsertar.
-    conn.execute("DELETE FROM transcripts_fts WHERE rowid = ?1", params![entry_id])?;
-    conn.execute(
+    tx.execute("DELETE FROM transcripts_fts WHERE rowid = ?1", params![entry_id])?;
+    tx.execute(
         "INSERT INTO transcripts_fts (rowid, text) VALUES (?1, ?2)",
         params![entry_id, text],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1980,20 +2065,22 @@ pub fn duplicates(conn: &Connection, min_size: i64, limit: i64) -> DbResult<Vec<
             })?
             .collect::<Result<_, _>>()?;
         // Colapsar el MISMO archivo físico contado varias veces: no es espacio
-        // "recuperable" real. Clave de identidad:
-        //   - si hay (device_id, inode) → identidad física exacta, incluso entre
-        //     discos escaneados en la misma sesión (firmlinks de macOS, hardlinks).
-        //   - si no (catálogo viejo / .dcmf) → fallback textual ACOTADO AL MISMO
-        //     disco: normalizar el alias `/System/Volumes/Data` para casar
-        //     `…/System/Volumes/Data/Volumes/Y` con `…/Volumes/Y`. Acotarlo por
-        //     disk_id evita colapsar dos discos distintos que comparten nombre de
-        //     volumen (misma ruta textual reconstruida) y SÍ son copias reales.
+        // "recuperable" real. Clave de identidad, SIEMPRE acotada al disco (disk_id):
+        //   - si hay (device_id, inode) → identidad física exacta dentro del disco
+        //     (firmlinks de macOS, hardlinks; ambos viven en un mismo filesystem).
+        //   - si no (catálogo viejo / .dcmf) → fallback textual: normalizar el alias
+        //     `/System/Volumes/Data` para casar `…/System/Volumes/Data/Volumes/Y` con
+        //     `…/Volumes/Y`.
+        // Acotar por disk_id es clave: st_dev se asigna al montar y los inodes son
+        // por-filesystem, así que dos archivos DISTINTOS en discos distintos pueden
+        // compartir (dev, inode) — sin el disk_id se colapsaría un duplicado REAL.
+        // Los hardlinks no cruzan filesystems, así que no perdemos colapsos legítimos.
         let mut seen = std::collections::HashSet::new();
         let mut items = Vec::with_capacity(raw.len());
         for (id, n, disk_name, disk_id, sz, dev, ino) in raw {
             let path = entry_path(conn, id)?;
             let key = match (dev, ino) {
-                (Some(d), Some(i)) => format!("ino:{d}:{i}"),
+                (Some(d), Some(i)) => format!("ino:{disk_id}:{d}:{i}"),
                 _ => format!("path:{disk_id}:{}", path.replace("/System/Volumes/Data", "")),
             };
             if !seen.insert(key) {
@@ -2747,7 +2834,7 @@ mod tests {
             &conn.query_row("SELECT id FROM entries WHERE name='nota.txt'", [], |r| r.get::<_, i64>(0)).unwrap()
         ));
 
-        store_transcript(&conn, a, "whisper-base", Some("es"), "hola esto es una prueba de perros", 123).unwrap();
+        store_transcript(&mut conn, a, "whisper-base", Some("es"), "hola esto es una prueba de perros", 123).unwrap();
         assert_eq!(count_transcripts(&conn).unwrap(), 1);
         // Ya no es candidato.
         assert!(!transcript_candidates(&conn, disk_id, exts).unwrap().contains(&a));
@@ -2762,7 +2849,7 @@ mod tests {
         assert!(search_transcripts(&conn, "perros", 10, Some("en")).unwrap().is_empty());
 
         // Re-transcribir REEMPLAZA en el FTS (sin duplicar): perros ya no está, gatos sí.
-        store_transcript(&conn, a, "whisper-base", Some("es"), "ahora habla de gatos", 124).unwrap();
+        store_transcript(&mut conn, a, "whisper-base", Some("es"), "ahora habla de gatos", 124).unwrap();
         assert!(search_transcripts(&conn, "perros", 10, None).unwrap().is_empty());
         assert_eq!(search_transcripts(&conn, "gatos", 10, None).unwrap().len(), 1);
         assert_eq!(count_transcripts(&conn).unwrap(), 1);
@@ -2943,7 +3030,7 @@ mod tests {
     fn migrations_add_columns_and_are_idempotent() {
         // Simula un catálogo "viejo": tablas mínimas sin las columnas nuevas,
         // tal como las crearía una versión anterior de la app.
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE disks (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
              CREATE TABLE entries (id INTEGER PRIMARY KEY, disk_id INTEGER NOT NULL,
@@ -2952,9 +3039,9 @@ mod tests {
         .unwrap();
 
         // Primera migración: agrega todas las columnas + índices.
-        apply_migrations(&conn).unwrap();
+        apply_migrations(&mut conn).unwrap();
         // Segunda corrida sobre el MISMO catálogo: no debe fallar (idempotente).
-        apply_migrations(&conn).unwrap();
+        apply_migrations(&mut conn).unwrap();
 
         // Verifica que las columnas nuevas existan en entries.
         let entry_cols: Vec<String> = conn

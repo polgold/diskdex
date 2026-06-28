@@ -165,6 +165,16 @@ export function applyNLFilters(items: SemanticItem[], f: SearchFilters): Semanti
       return false;
     if (f.kind === "folder" && !it.is_folder) return false;
     if (f.kind === "file" && it.is_folder) return false;
+    // Lugar (C1) y luz (C2): mismo criterio que el server (gps_place/light_phase LIKE,
+    // case-insensitive). Los hits sin metadata no matchean un filtro de place/light.
+    if (f.place != null && f.place.trim() !== "") {
+      const p = f.place.trim().toLowerCase();
+      if (it.gps_place == null || !it.gps_place.toLowerCase().includes(p)) return false;
+    }
+    if (f.light != null && f.light.trim() !== "") {
+      const l = f.light.trim().toLowerCase();
+      if (it.light_phase == null || !it.light_phase.toLowerCase().includes(l)) return false;
+    }
     return true;
   });
 }

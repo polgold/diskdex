@@ -10,7 +10,7 @@ use crate::video;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
@@ -111,30 +111,74 @@ pub fn cancel_scan(mount_path: String) {
     }
 }
 
-/// Cancelaciones de copia de backup en curso, keyed por disco destino (string).
-/// Igual patrón que SCAN_CANCELS pero para `copy_missing` (B2).
-static COPY_CANCELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Copias de backup en curso. Cada operación (copy_missing / gather_copy) tiene un
+/// `id` único, así que terminar una NO borra la cancelación pendiente de otra que
+/// comparta el mismo destino (bug histórico de keyear sólo por disco/dir). La
+/// cancelación se pide por DESTINO (`dest_key`): marca todas las ops activas hacia
+/// ese destino. La copia se detiene en el próximo archivo (no parte un archivo).
+struct CopyOp {
+    id: u64,
+    dest_key: String,
+    cancelled: bool,
+}
+static COPY_OPS: Mutex<Vec<CopyOp>> = Mutex::new(Vec::new());
+static COPY_OP_SEQ: AtomicU64 = AtomicU64::new(1);
 
-fn copy_cancel_requested(key: &str) -> bool {
-    COPY_CANCELS.lock().map(|v| v.iter().any(|m| m == key)).unwrap_or(false)
+/// Registra una operación de copia hacia `dest_key` y devuelve su id único.
+fn copy_op_begin(dest_key: String) -> u64 {
+    let id = COPY_OP_SEQ.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut v) = COPY_OPS.lock() {
+        v.push(CopyOp { id, dest_key, cancelled: false });
+    }
+    id
 }
 
-fn clear_copy_cancel(key: &str) {
-    if let Ok(mut v) = COPY_CANCELS.lock() {
-        v.retain(|m| m != key);
+/// ¿Se pidió cancelar ESTA operación?
+fn copy_op_cancelled(id: u64) -> bool {
+    COPY_OPS.lock().map(|v| v.iter().any(|o| o.id == id && o.cancelled)).unwrap_or(false)
+}
+
+/// Da de baja la operación (al terminar). No toca otras ops del mismo destino.
+fn copy_op_end(id: u64) {
+    if let Ok(mut v) = COPY_OPS.lock() {
+        v.retain(|o| o.id != id);
     }
+}
+
+/// Marca para cancelar todas las ops activas hacia `dest_key`.
+fn copy_op_request_cancel(dest_key: &str) {
+    if let Ok(mut v) = COPY_OPS.lock() {
+        for o in v.iter_mut().filter(|o| o.dest_key == dest_key) {
+            o.cancelled = true;
+        }
+    }
+}
+
+fn copy_dest_key_disk(dest_disk_id: i64) -> String {
+    format!("disk:{dest_disk_id}")
+}
+
+fn copy_dest_key_gather(dest_dir: &str) -> String {
+    format!("gather:{dest_dir}")
+}
+
+/// ¿El destino preexistente ya es una copia válida del origen? Compara primero el
+/// tamaño (barato) y, sólo si coincide, el hash BLAKE3 de ambos. Así un archivo
+/// corrupto/parcial dejado en el destino NO se cuenta como respaldado.
+fn dest_matches_source(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<bool> {
+    let sm = std::fs::metadata(src)?;
+    let dm = std::fs::metadata(dst)?;
+    if sm.len() != dm.len() {
+        return Ok(false);
+    }
+    Ok(scan::hash_file(src)? == scan::hash_file(dst)?)
 }
 
 /// Pide cancelar la copia de backup en curso hacia `dest_disk_id`. La copia se
 /// detiene en el próximo archivo (no interrumpe un archivo a medio copiar).
 #[tauri::command(async)]
 pub fn cancel_copy(dest_disk_id: i64) {
-    if let Ok(mut v) = COPY_CANCELS.lock() {
-        let key = dest_disk_id.to_string();
-        if !v.iter().any(|m| m == &key) {
-            v.push(key);
-        }
-    }
+    copy_op_request_cancel(&copy_dest_key_disk(dest_disk_id));
 }
 
 /// M0: sanity check de la IPC.
@@ -577,8 +621,7 @@ pub fn copy_missing(
     }
 
     // 2) Copia real (sin el lock del catálogo).
-    let cancel_key = args.dest_disk_id.to_string();
-    clear_copy_cancel(&cancel_key);
+    let op = copy_op_begin(copy_dest_key_disk(args.dest_disk_id));
     let mut copied = 0u64;
     let mut copied_bytes = 0i64;
     let mut verified = 0u64;
@@ -587,15 +630,27 @@ pub fn copy_missing(
     let mut cancelled = false;
 
     for (i, f) in missing.iter().enumerate() {
-        if copy_cancel_requested(&cancel_key) {
+        if copy_op_cancelled(op) {
             cancelled = true;
             break;
         }
         let src = src_root_real.join(&f.rel_path);
         let dst = dst_root_real.join(&f.rel_path);
-        // Nunca sobreescribir: si el destino ya existe, lo salteamos.
+        // Nunca sobreescribir. Si el destino ya existe, verificamos que sea una copia
+        // válida del origen antes de darlo por respaldado: un archivo corrupto/parcial
+        // (p.ej. de una copia previa interrumpida) NO debe contar como "skipped".
         if dst.exists() {
-            skipped += 1;
+            match dest_matches_source(&src, &dst) {
+                Ok(true) => skipped += 1,
+                Ok(false) => failed.push(CopyFailure {
+                    rel_path: f.rel_path.clone(),
+                    error: "el destino ya existe pero difiere del origen (no se sobreescribe); borralo para re-copiar".into(),
+                }),
+                Err(e) => failed.push(CopyFailure {
+                    rel_path: f.rel_path.clone(),
+                    error: format!("no se pudo verificar el destino existente: {e}"),
+                }),
+            }
             continue;
         }
         match scan::copy_file_verified(&src, &dst) {
@@ -611,7 +666,7 @@ pub fn copy_missing(
             CopyProgress { count: (i + 1) as u64, total: planned, copied, bytes: copied_bytes },
         );
     }
-    clear_copy_cancel(&cancel_key);
+    copy_op_end(op);
 
     Ok(CopyResult {
         dry_run: false,
@@ -660,6 +715,7 @@ pub fn gather_copy(
     let dest_root = PathBuf::from(&args.dest_dir);
     let mut plan: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut failed: Vec<CopyFailure> = Vec::new();
+    let mut planned_bytes = 0i64;
     {
         let guard = state.catalog.lock().unwrap();
         let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
@@ -671,13 +727,25 @@ pub fn gather_copy(
                     continue;
                 }
             };
+            // disk_id + tamaño de la entrada (para carpeta única por disco y planned_bytes).
+            let (disk_id, size): (i64, i64) = cat
+                .conn
+                .query_row(
+                    "SELECT disk_id, size_logical FROM entries WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((-1, 0));
             match resolve_real_path(&cat.conn, *id) {
                 Ok(src) => {
-                    // Destino = dest/<disco>/<rel>. comps[0] = nombre del disco.
+                    // Destino = dest/<disco (#id)>/<rel>. El sufijo #id evita que dos discos
+                    // con el mismo nombre (p.ej. dos SD "NO NAME") colisionen y se pierdan archivos.
                     let comps: Vec<&str> = cat_path.split('/').filter(|s| !s.is_empty()).collect();
                     let rel: PathBuf = comps.iter().skip(1).collect();
-                    let disk = comps.first().copied().unwrap_or("disco");
-                    let dst = dest_root.join(disk).join(&rel);
+                    let disk_name = comps.first().copied().unwrap_or("disco");
+                    let disk_folder = format!("{disk_name} (#{disk_id})");
+                    let dst = dest_root.join(disk_folder).join(&rel);
+                    planned_bytes += size.max(0);
                     plan.push((src, dst));
                 }
                 Err(e) => failed.push(CopyFailure { rel_path: cat_path, error: e }),
@@ -687,8 +755,7 @@ pub fn gather_copy(
 
     let planned = (plan.len() + failed.len()) as u64;
     // 2) Copia real (sin lock), con progreso + cancelación.
-    let cancel_key = format!("gather:{}", args.dest_dir);
-    clear_copy_cancel(&cancel_key);
+    let op = copy_op_begin(copy_dest_key_gather(&args.dest_dir));
     let mut copied = 0u64;
     let mut copied_bytes = 0i64;
     let mut verified = 0u64;
@@ -697,12 +764,23 @@ pub fn gather_copy(
     let total = plan.len() as u64;
 
     for (i, (src, dst)) in plan.iter().enumerate() {
-        if copy_cancel_requested(&cancel_key) {
+        if copy_op_cancelled(op) {
             cancelled = true;
             break;
         }
+        // Nunca sobreescribir; verificar el destino preexistente (ver copy_missing).
         if dst.exists() {
-            skipped += 1;
+            match dest_matches_source(src, dst) {
+                Ok(true) => skipped += 1,
+                Ok(false) => failed.push(CopyFailure {
+                    rel_path: dst.to_string_lossy().to_string(),
+                    error: "el destino ya existe pero difiere del origen (no se sobreescribe); borralo para re-copiar".into(),
+                }),
+                Err(e) => failed.push(CopyFailure {
+                    rel_path: dst.to_string_lossy().to_string(),
+                    error: format!("no se pudo verificar el destino existente: {e}"),
+                }),
+            }
             continue;
         }
         match scan::copy_file_verified(src, dst) {
@@ -721,12 +799,12 @@ pub fn gather_copy(
             CopyProgress { count: (i + 1) as u64, total, copied, bytes: copied_bytes },
         );
     }
-    clear_copy_cancel(&cancel_key);
+    copy_op_end(op);
 
     Ok(CopyResult {
         dry_run: false,
         planned,
-        planned_bytes: 0,
+        planned_bytes,
         copied,
         copied_bytes,
         verified,
@@ -740,12 +818,7 @@ pub fn gather_copy(
 /// Cancela una copia "gather" en curso hacia `dest_dir`.
 #[tauri::command(async)]
 pub fn cancel_gather(dest_dir: String) {
-    if let Ok(mut v) = COPY_CANCELS.lock() {
-        let key = format!("gather:{dest_dir}");
-        if !v.iter().any(|m| m == &key) {
-            v.push(key);
-        }
-    }
+    copy_op_request_cancel(&copy_dest_key_gather(&dest_dir));
 }
 
 /// M7: edita el comentario de una entrada.
@@ -1641,6 +1714,22 @@ fn scan_disk_blocking(
         ScanProgress { mount: mount_path.clone(), count: disk.entries.len() as u64, pct: -2 },
     );
 
+    // Guarda contra cambio de catálogo durante el escaneo: si el usuario abrió otro
+    // catálogo mientras escaneábamos, NO ingestar en el viejo. Ingestar ahí escondería
+    // los datos en un catálogo no visible y dispararía el full-replace por volume_uuid
+    // sobre él (aparente pérdida de datos). Chequeamos justo antes de escribir, que es
+    // cuando importa (la ventana residual entre este chequeo y la ingesta es mínima).
+    {
+        let guard = state.catalog.lock().unwrap();
+        if guard.as_ref().map(|c| &c.path) != Some(&cat_path) {
+            return Err(
+                "se cambió de catálogo durante el escaneo; el resultado no se guardó. \
+                 Reabrí el catálogo deseado y volvé a escanear."
+                    .into(),
+            );
+        }
+    }
+
     // Ingesta en una conexión PROPIA (WAL): así insertar millones de filas NO
     // bloquea las lecturas de la UI (clickear discos/carpetas) ni a otros
     // escaneos. La conexión compartida queda libre; otro escritor espera por
@@ -1958,7 +2047,11 @@ fn ai_index_blocking(app: tauri::AppHandle, rebuild: bool) -> Result<i64, String
     for chunk in candidates.chunks(BATCH) {
         let bytes: Vec<Vec<u8>> = chunk.iter().map(|(_, b)| b.clone()).collect();
         let vecs = {
-            let e = engine.lock().unwrap();
+            // Recuperar el guard aunque el Mutex esté envenenado: un panic previo en
+            // inferencia (media malformada) no debe dejar muerto el engine AI para siempre.
+            // El Engine sólo aloja los pesos del modelo (no muta por llamada), así que
+            // seguir usándolo tras un panic es seguro.
+            let e = engine.lock().unwrap_or_else(|p| p.into_inner());
             e.embed_images(&bytes)
                 .map_err(|err| format!("embedding: {err}"))?
         };
@@ -2008,7 +2101,11 @@ fn ai_search_blocking(
     // Embedding de la query (carga el modelo si hace falta).
     let qv = {
         let engine = crate::ai::engine().map_err(|e| format!("modelo IA: {e}"))?;
-        let e = engine.lock().unwrap();
+        // Recuperar el guard aunque el Mutex esté envenenado: un panic previo en
+        // inferencia (media malformada) no debe dejar muerto el engine AI para siempre.
+        // El Engine sólo aloja los pesos del modelo (no muta por llamada), así que
+        // seguir usándolo tras un panic es seguro.
+        let e = engine.lock().unwrap_or_else(|p| p.into_inner());
         e.embed_text(&query)
             .map_err(|err| format!("embedding texto: {err}"))?
     };
@@ -2058,15 +2155,19 @@ fn rank_embeddings_to_items(
         scored.iter().map(|(s, ts, id)| (*id, (*s, *ts))).collect();
     let ids: Vec<i64> = scored.iter().map(|(_, _, id)| *id).collect();
     let items = db::search_items_by_ids(conn, &ids).map_err(|e| e.to_string())?;
+    let mut places = db::places_for_ids(conn, &ids).map_err(|e| e.to_string())?;
     Ok(items
         .into_iter()
         .map(|item| {
             let (score, frame_ts) = smap.get(&item.id).copied().unwrap_or((0.0, None));
+            let (gps_place, light_phase) = places.remove(&item.id).unwrap_or((None, None));
             db::SemanticItem {
                 item,
                 score,
                 frame_ts,
                 snippet: None,
+                gps_place,
+                light_phase,
             }
         })
         .collect())
@@ -2327,7 +2428,7 @@ fn ai_transcribe_disk_blocking(app: tauri::AppHandle, disk_id: i64) -> Result<i6
     );
     let engine = crate::ai::whisper_engine().map_err(|e| format!("modelo Whisper: {e}"))?;
 
-    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let mut conn = db::open(&path).map_err(|e| e.to_string())?;
     let exts = av_exts();
     let candidates =
         db::transcript_candidates(&conn, disk_id, &exts).map_err(|e| e.to_string())?;
@@ -2344,13 +2445,15 @@ fn ai_transcribe_disk_blocking(app: tauri::AppHandle, disk_id: i64) -> Result<i6
             if let Ok(pcm) = video::extract_audio_pcm(&real) {
                 if !pcm.is_empty() {
                     let res = {
-                        let mut e = engine.lock().unwrap();
+                        // Recuperar el guard aunque esté envenenado (ver embed): un panic
+                        // en una transcripción previa no debe matar el engine para siempre.
+                        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
                         e.transcribe(&pcm)
                     };
                     if let Ok((lang, text)) = res {
                         if !text.is_empty() {
                             let lang_opt = if lang.is_empty() { None } else { Some(lang.as_str()) };
-                            db::store_transcript(&conn, entry_id, &model, lang_opt, &text, now)
+                            db::store_transcript(&mut conn, entry_id, &model, lang_opt, &text, now)
                                 .map_err(|e| e.to_string())?;
                         }
                     }
@@ -2387,15 +2490,19 @@ pub async fn ai_search_transcripts(
     let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
     let snippets: std::collections::HashMap<i64, String> = hits.into_iter().collect();
     let items = db::search_items_by_ids(&cat.conn, &ids).map_err(|e| e.to_string())?;
+    let mut places = db::places_for_ids(&cat.conn, &ids).map_err(|e| e.to_string())?;
     Ok(items
         .into_iter()
         .map(|item| {
             let snippet = snippets.get(&item.id).cloned();
+            let (gps_place, light_phase) = places.remove(&item.id).unwrap_or((None, None));
             db::SemanticItem {
                 item,
                 score: 1.0,
                 frame_ts: None,
                 snippet,
+                gps_place,
+                light_phase,
             }
         })
         .collect())
@@ -2452,7 +2559,7 @@ fn ai_index_videos_blocking(
     );
     let engine = crate::ai::engine().map_err(|e| format!("modelo IA: {e}"))?;
 
-    let conn = db::open(&path).map_err(|e| e.to_string())?;
+    let mut conn = db::open(&path).map_err(|e| e.to_string())?;
     let candidates = db::video_embedding_candidates(&conn, disk_id, &model, VIDEO_THUMB_EXTS)
         .map_err(|e| e.to_string())?;
     let total = candidates.len() as i64;
@@ -2477,17 +2584,26 @@ fn ai_index_videos_blocking(
 
             if !bytes.is_empty() {
                 let vecs = {
-                    let e = engine.lock().unwrap();
+                    // Recuperar el guard aunque el Mutex esté envenenado: un panic previo en
+                    // inferencia (media malformada) no debe dejar muerto el engine AI para siempre.
+                    // El Engine sólo aloja los pesos del modelo (no muta por llamada), así que
+                    // seguir usándolo tras un panic es seguro.
+                    let e = engine.lock().unwrap_or_else(|p| p.into_inner());
                     e.embed_images(&bytes)
                         .map_err(|err| format!("embedding: {err}"))?
                 };
-                // Reemplaza embeddings previos del clip (p.ej. el frame único de Fase 1).
-                db::delete_embeddings_for_entry(&conn, entry_id, &model)
+                // Reemplaza embeddings previos del clip (p.ej. el frame único de Fase 1)
+                // en UNA transacción: si se interrumpe a mitad, el clip no queda con un
+                // subconjunto de frames (video_embedding_candidates lo excluiría por tener
+                // ≥1 frame → quedaría sub-indexado para siempre). O todos, o ninguno.
+                let tx = conn.transaction().map_err(|e| e.to_string())?;
+                db::delete_embeddings_for_entry(&tx, entry_id, &model)
                     .map_err(|e| e.to_string())?;
                 for (ts, v) in ts_ok.iter().zip(vecs.iter()) {
-                    db::store_embedding(&conn, entry_id, &model, Some(*ts), v)
+                    db::store_embedding(&tx, entry_id, &model, Some(*ts), v)
                         .map_err(|e| e.to_string())?;
                 }
+                tx.commit().map_err(|e| e.to_string())?;
             }
         }
         done += 1;

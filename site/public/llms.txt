@@ -1,0 +1,34 @@
+# DiskDex
+
+> DiskDex is a desktop app (macOS and Windows) that indexes the contents of all
+> your backup drives so you can search and browse them even when the disks are
+> unplugged. Built for post-production and anyone managing large offline archives.
+
+## What it does
+- Imports DiskCatalogMaker `.dcmf` catalogs losslessly (names, hierarchy, dates, real sizes up to hundreds of GB).
+- Scans new drives automatically on connect; stores logical + physical size and a volume fingerprint to recognize a disk on reconnection (re-scan updates in place, no duplicates).
+- Marks each drive online/offline based on what is currently mounted.
+- Full-text search by name across every drive at once, returning the drive and full path per result — in under a second over millions of files.
+- Finds duplicate files across drives and shows catalog statistics and backup coverage.
+
+## Proven scale
+- 54 drives, 6,828,850 files, ~116 TB catalogued.
+- Search for "*.mov": 261,991 results in 0.48 seconds.
+- Largest single file read without truncation: 174.94 GB.
+
+## Tech
+- Tauri 2 + Rust engine, React + TypeScript UI, SQLite + FTS5 (one portable catalog file).
+- Local-first: the catalog stays on the user's machine; nothing is uploaded unless the user chooses to.
+
+## Roadmap
+- Advanced filters (type, size, date), export (CSV / JSON / PDF).
+- Secure remote connector: pull actual files from the local network to the cloud or another machine without moving the disk — read-only, device-authenticated, encrypted.
+
+## Links
+- Website: https://diskdex.app
+- Source: https://github.com/polgold/diskdex
+- Downloads: https://github.com/polgold/diskdex/releases
+
+## Availability
+- Free download for macOS 12+ and Windows 10/11 (Apple Silicon and Intel).
+- Languages: Spanish and English.

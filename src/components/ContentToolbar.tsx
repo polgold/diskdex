@@ -12,6 +12,7 @@ import {
   Trash2,
   List,
   LayoutGrid,
+  GitCompareArrows,
 } from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import { useT } from "../lib/i18n";
@@ -19,6 +20,7 @@ import { exportRows, type ExportRow, type ExportFormat } from "../lib/export";
 import { FILE_CATEGORIES } from "../lib/query-parser";
 import { StatsDialog } from "./StatsDialog";
 import { DuplicatesDialog } from "./DuplicatesDialog";
+import { CompareDialog } from "./CompareDialog";
 import { trashIds } from "./ContentTable";
 
 const CATEGORY_ICONS: Record<string, React.ReactNode> = {
@@ -85,6 +87,7 @@ export function ContentToolbar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [stats, setStats] = useState(false);
   const [dups, setDups] = useState(false);
+  const [compare, setCompare] = useState(false);
 
   function buildRows(): { rows: ExportRow[]; name: string } {
     if (mode === "search") {
@@ -165,6 +168,12 @@ export function ContentToolbar() {
       >
         <Copy className="h-3.5 w-3.5" /> {t("toolbar.duplicates")}
       </button>
+      <button
+        onClick={() => setCompare(true)}
+        className="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
+      >
+        <GitCompareArrows className="h-3.5 w-3.5" /> {t("toolbar.compare")}
+      </button>
 
       {selectedIds.length > 0 && (
         <button
@@ -209,6 +218,7 @@ export function ContentToolbar() {
 
       {stats && <StatsDialog onClose={() => setStats(false)} />}
       {dups && <DuplicatesDialog onClose={() => setDups(false)} />}
+      {compare && <CompareDialog onClose={() => setCompare(false)} />}
     </div>
   );
 }

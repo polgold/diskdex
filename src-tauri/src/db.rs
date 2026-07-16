@@ -1365,6 +1365,256 @@ pub fn duplicates(conn: &Connection, min_size: i64, limit: i64) -> DbResult<Vec<
     Ok(out)
 }
 
+// ---------- Comparación de discos / verificación de backup (M9) ----------
+
+/// Una diferencia entre disco origen y destino, identificada por su ruta
+/// relativa (sin el nombre del volumen raíz, para que «MASTER» vs «BACKUP»
+/// comparen su estructura interna).
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffEntry {
+    pub rel_path: String,
+    pub is_folder: bool,
+    pub src_size: i64,
+    pub dst_size: i64,
+    /// Entrada del catálogo en el disco origen (para resolver su ruta real).
+    pub src_entry_id: i64,
+}
+
+/// Resultado de comparar dos discos por ruta relativa + tamaño.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskDiff {
+    /// Presentes en origen y ausentes en destino (hay que copiarlos).
+    pub missing: Vec<DiffEntry>,
+    /// Misma ruta en ambos pero distinto tamaño (copia incompleta/corrupta).
+    pub size_mismatch: Vec<DiffEntry>,
+    /// Presentes en destino y ausentes en origen (informativo).
+    pub extra: Vec<DiffEntry>,
+    pub missing_count: i64,
+    /// Solo los archivos faltantes: lo que realmente copia el mirror (las
+    /// carpetas se crean solas al copiar su contenido).
+    pub missing_file_count: i64,
+    pub missing_bytes: i64,
+    pub mismatch_count: i64,
+    pub mismatch_bytes: i64,
+    pub extra_count: i64,
+    /// `true` si alguna lista se recortó a `limit` (los contadores son exactos).
+    pub truncated: bool,
+}
+
+/// Nodo del índice de rutas relativas de un disco.
+struct RelNode {
+    is_folder: bool,
+    size: i64,
+    entry_id: i64,
+}
+
+/// Construye un mapa `rutaRelativa -> nodo` para un disco, opcionalmente
+/// limitado al subárbol bajo `root_id` (una carpeta). Las rutas son relativas a
+/// esa carpeta; con `root_id = None` son relativas a la raíz del disco (se omite
+/// el nombre del volumen, igual que `resolve_real_path` con su `skip(1)`), de
+/// modo que dos carpetas con distinto disco/volumen pero misma estructura
+/// interna comparen correctamente.
+fn disk_rel_index(
+    conn: &Connection,
+    disk_id: i64,
+    root_id: Option<i64>,
+) -> DbResult<std::collections::HashMap<String, RelNode>> {
+    // Cargamos todas las entradas del disco de una y armamos las rutas en
+    // memoria (evita N consultas recursivas para discos con miles de archivos).
+    let mut stmt = conn.prepare(
+        "SELECT id, parent_id, name, is_folder, size_logical FROM entries WHERE disk_id = ?1",
+    )?;
+    let rows: Vec<(i64, Option<i64>, String, i64, i64)> = stmt
+        .query_map([disk_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<Result<_, _>>()?;
+
+    // id -> (parent, name)
+    let mut nodes: std::collections::HashMap<i64, (Option<i64>, String)> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (id, parent, name, _is_folder, _size) in &rows {
+        nodes.insert(*id, (*parent, name.clone()));
+    }
+
+    let mut index: std::collections::HashMap<String, RelNode> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (id, _parent, _name, is_folder, size) in rows {
+        // Subimos por la cadena de padres acumulando nombres. Con `root_id` nos
+        // detenemos al llegar a esa carpeta (sin incluir su nombre); si nunca la
+        // alcanzamos, la entrada no está en el subárbol y se descarta.
+        let mut comps: Vec<&str> = Vec::new();
+        let mut cur = Some(id);
+        let mut in_subtree = root_id.is_none();
+        while let Some(cid) = cur {
+            if root_id == Some(cid) {
+                in_subtree = true;
+                break; // excluimos el nombre de la carpeta raíz elegida
+            }
+            if let Some((parent, name)) = nodes.get(&cid) {
+                comps.push(name.as_str());
+                cur = *parent;
+            } else {
+                break;
+            }
+        }
+        if !in_subtree {
+            continue;
+        }
+        comps.reverse(); // [raíz…, a, b, archivo] (o [a, b, archivo] si hay root_id)
+        let rel = if root_id.is_none() {
+            if comps.len() <= 1 {
+                continue; // la entrada raíz del volumen no tiene ruta relativa
+            }
+            comps[1..].join("/") // descartamos el nombre del volumen raíz
+        } else {
+            if comps.is_empty() {
+                continue; // la propia carpeta raíz elegida
+            }
+            comps.join("/")
+        };
+        index.insert(rel, RelNode { is_folder: is_folder != 0, size, entry_id: id });
+    }
+    Ok(index)
+}
+
+/// Compara dos subárboles (discos o carpetas) por ruta relativa + tamaño.
+/// `src_root`/`dst_root` acotan cada lado a una carpeta (None = disco entero).
+/// `limit` recorta cada lista devuelta a la UI; los contadores/bytes son exactos.
+pub fn compare_disks(
+    conn: &Connection,
+    src_id: i64,
+    dst_id: i64,
+    src_root: Option<i64>,
+    dst_root: Option<i64>,
+    limit: usize,
+) -> DbResult<DiskDiff> {
+    let src = disk_rel_index(conn, src_id, src_root)?;
+    let dst = disk_rel_index(conn, dst_id, dst_root)?;
+
+    let mut diff = DiskDiff {
+        missing: Vec::new(),
+        size_mismatch: Vec::new(),
+        extra: Vec::new(),
+        missing_count: 0,
+        missing_file_count: 0,
+        missing_bytes: 0,
+        mismatch_count: 0,
+        mismatch_bytes: 0,
+        extra_count: 0,
+        truncated: false,
+    };
+
+    for (rel, node) in &src {
+        match dst.get(rel) {
+            None => {
+                diff.missing_count += 1;
+                if !node.is_folder {
+                    diff.missing_file_count += 1;
+                    diff.missing_bytes += node.size;
+                }
+                if diff.missing.len() < limit {
+                    diff.missing.push(DiffEntry {
+                        rel_path: rel.clone(),
+                        is_folder: node.is_folder,
+                        src_size: node.size,
+                        dst_size: 0,
+                        src_entry_id: node.entry_id,
+                    });
+                } else {
+                    diff.truncated = true;
+                }
+            }
+            Some(dn) => {
+                // Solo los archivos se comparan por tamaño; las carpetas coinciden por existir.
+                if !node.is_folder && !dn.is_folder && node.size != dn.size {
+                    diff.mismatch_count += 1;
+                    diff.mismatch_bytes += node.size;
+                    if diff.size_mismatch.len() < limit {
+                        diff.size_mismatch.push(DiffEntry {
+                            rel_path: rel.clone(),
+                            is_folder: false,
+                            src_size: node.size,
+                            dst_size: dn.size,
+                            src_entry_id: node.entry_id,
+                        });
+                    } else {
+                        diff.truncated = true;
+                    }
+                }
+            }
+        }
+    }
+
+    for (rel, node) in &dst {
+        if !src.contains_key(rel) {
+            diff.extra_count += 1;
+            if diff.extra.len() < limit {
+                diff.extra.push(DiffEntry {
+                    rel_path: rel.clone(),
+                    is_folder: node.is_folder,
+                    src_size: 0,
+                    dst_size: node.size,
+                    src_entry_id: node.entry_id,
+                });
+            } else {
+                diff.truncated = true;
+            }
+        }
+    }
+
+    // Orden estable y útil: por ruta.
+    diff.missing.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    diff.size_mismatch.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    diff.extra.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(diff)
+}
+
+/// Ruta de una entrada relativa a la raíz del disco (sin el nombre del volumen),
+/// con separadores '/'. Sirve como prefijo para reconstruir la ruta real bajo el
+/// `mount_path` al copiar un subárbol acotado a una carpeta. `""` si es la raíz.
+pub fn disk_rel_path_of(conn: &Connection, entry_id: i64) -> DbResult<String> {
+    let full = entry_path(conn, entry_id)?; // "/Vol/A/B"
+    let comps: Vec<&str> = full.split('/').filter(|s| !s.is_empty()).skip(1).collect();
+    Ok(comps.join("/"))
+}
+
+/// Un archivo a copiar del origen al destino durante el mirror.
+pub struct CopyItem {
+    pub rel_path: String,
+    pub size: i64,
+}
+
+/// Plan de copia SIN recorte: todos los archivos (no carpetas) que faltan en el
+/// destino y, si `include_mismatch`, también los de tamaño distinto. Las
+/// carpetas se crean implícitamente al copiar los archivos que contienen.
+/// `src_root`/`dst_root` acotan cada lado a una carpeta (None = disco entero).
+pub fn copy_plan(
+    conn: &Connection,
+    src_id: i64,
+    dst_id: i64,
+    src_root: Option<i64>,
+    dst_root: Option<i64>,
+    include_mismatch: bool,
+) -> DbResult<Vec<CopyItem>> {
+    let src = disk_rel_index(conn, src_id, src_root)?;
+    let dst = disk_rel_index(conn, dst_id, dst_root)?;
+    let mut out: Vec<CopyItem> = Vec::new();
+    for (rel, node) in &src {
+        if node.is_folder {
+            continue;
+        }
+        match dst.get(rel) {
+            None => out.push(CopyItem { rel_path: rel.clone(), size: node.size }),
+            Some(dn) => {
+                if include_mismatch && !dn.is_folder && dn.size != node.size {
+                    out.push(CopyItem { rel_path: rel.clone(), size: node.size });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,6 +1641,99 @@ mod tests {
         assert_eq!(disks, 1);
         let files: i64 = conn.query_row("SELECT file_count FROM disks", [], |r| r.get(0)).unwrap();
         assert_eq!(files, 2);
+    }
+
+    /// Backup incompleto: al destino le falta B-ROLL.MOV y tiene C0001.MP4 con
+    /// tamaño distinto (copia truncada). El nombre del volumen difiere a propósito.
+    fn backup_disk() -> DcmfDisk {
+        DcmfDisk {
+            name: "BACKUP".into(),
+            entries: vec![
+                DcmfEntry { name: "BACKUP".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                DcmfEntry { name: "CLIP".into(), parent: 0, is_folder: true, is_volume: false, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                // Mismo nombre y ruta, pero tamaño distinto → size_mismatch.
+                DcmfEntry { name: "C0001.MP4".into(), parent: 1, is_folder: false, is_volume: false, size_logical: 1_000_000, size_physical: 1_000_000, created: 0, modified: 0 },
+            ],
+        }
+    }
+
+    #[test]
+    fn compare_finds_missing_and_mismatch_ignoring_volume_name() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk(), backup_disk()]).unwrap();
+        let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
+        let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='BACKUP'", [], |r| r.get(0)).unwrap();
+
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        // Falta el archivo B-ROLL.MOV (la carpeta CLIP existe en ambos).
+        assert_eq!(diff.missing_count, 1);
+        assert_eq!(diff.missing[0].rel_path, "CLIP/B-ROLL.MOV");
+        assert_eq!(diff.missing_bytes, 1_000_000_000);
+        // Sin carpetas faltantes, ambos contadores coinciden.
+        assert_eq!(diff.missing_file_count, 1);
+        // C0001.MP4 existe en ambos pero con tamaño distinto.
+        assert_eq!(diff.mismatch_count, 1);
+        assert_eq!(diff.size_mismatch[0].rel_path, "CLIP/C0001.MP4");
+        assert_eq!(diff.extra_count, 0);
+
+        // El plan de copia con mismatch incluye ambos archivos.
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, true).unwrap();
+        assert_eq!(plan.len(), 2);
+        // Sin mismatch, solo el faltante.
+        let plan_no_mm = copy_plan(&conn, src_id, dst_id, None, None, false).unwrap();
+        assert_eq!(plan_no_mm.len(), 1);
+        assert_eq!(plan_no_mm[0].rel_path, "CLIP/B-ROLL.MOV");
+    }
+
+    /// Destino vacío: le falta la carpeta CLIP entera además de sus 2 archivos.
+    fn empty_backup_disk() -> DcmfDisk {
+        DcmfDisk {
+            name: "VACIO".into(),
+            entries: vec![
+                DcmfEntry { name: "VACIO".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+            ],
+        }
+    }
+
+    /// `missing_count` incluye carpetas, pero el mirror solo copia archivos (las
+    /// carpetas nacen del `create_dir_all`). `missing_file_count` es el número
+    /// que la UI ofrece copiar, y tiene que coincidir con el plan de copia.
+    #[test]
+    fn missing_file_count_excludes_folders_and_matches_copy_plan() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk(), empty_backup_disk()]).unwrap();
+        let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
+        let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='VACIO'", [], |r| r.get(0)).unwrap();
+
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        // 3 faltantes: la carpeta CLIP + sus 2 archivos.
+        assert_eq!(diff.missing_count, 3);
+        // Pero solo 2 se copian.
+        assert_eq!(diff.missing_file_count, 2);
+
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, false).unwrap();
+        assert_eq!(plan.len() as i64, diff.missing_file_count);
+    }
+
+    #[test]
+    fn compare_scoped_to_a_folder_uses_paths_relative_to_it() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk(), backup_disk()]).unwrap();
+        let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
+        let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='BACKUP'", [], |r| r.get(0)).unwrap();
+        // Carpeta CLIP en cada disco.
+        let src_clip: i64 = conn.query_row("SELECT id FROM entries WHERE disk_id=?1 AND name='CLIP'", [src_id], |r| r.get(0)).unwrap();
+        let dst_clip: i64 = conn.query_row("SELECT id FROM entries WHERE disk_id=?1 AND name='CLIP'", [dst_id], |r| r.get(0)).unwrap();
+
+        // Acotado a CLIP↔CLIP, las rutas son relativas a esa carpeta (sin prefijo "CLIP/").
+        let diff = compare_disks(&conn, src_id, dst_id, Some(src_clip), Some(dst_clip), 1000).unwrap();
+        assert_eq!(diff.missing_count, 1);
+        assert_eq!(diff.missing[0].rel_path, "B-ROLL.MOV");
+        assert_eq!(diff.mismatch_count, 1);
+        assert_eq!(diff.size_mismatch[0].rel_path, "C0001.MP4");
+
+        // El prefijo de la carpeta relativa al disco es "CLIP".
+        assert_eq!(disk_rel_path_of(&conn, src_clip).unwrap(), "CLIP");
     }
 
     #[test]

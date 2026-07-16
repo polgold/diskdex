@@ -268,6 +268,23 @@ export const api = {
   findDuplicates: (minSize?: number, limit?: number) =>
     invoke<DupGroup[]>("find_duplicates", { minSize, limit }),
 
+  // M9 — comparación de discos/carpetas / verificación de backup
+  compareDisks: (
+    srcDiskId: number,
+    dstDiskId: number,
+    srcRootId: number | null,
+    dstRootId: number | null,
+    limit?: number,
+  ) => invoke<DiskDiff>("compare_disks", { srcDiskId, dstDiskId, srcRootId, dstRootId, limit }),
+  copyMissing: (
+    srcDiskId: number,
+    dstDiskId: number,
+    srcRootId: number | null,
+    dstRootId: number | null,
+    includeMismatch: boolean,
+  ) => invoke<CopySummary>("copy_missing", { srcDiskId, dstDiskId, srcRootId, dstRootId, includeMismatch }),
+  cancelCopy: () => invoke<void>("cancel_copy"),
+
   // M5 — escaneo / detección de discos
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),
   scanDisk: (mountPath: string, name?: string, options?: ScanOptions) =>
@@ -318,5 +335,43 @@ export interface IndexProgress {
 }
 export const onScanProgress = (cb: (p: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>("scan-progress", (e) => cb(e.payload));
+
+// M9 — comparación de discos / mirror de backup.
+export interface DiffEntry {
+  rel_path: string;
+  is_folder: boolean;
+  src_size: number;
+  dst_size: number;
+  src_entry_id: number;
+}
+export interface DiskDiff {
+  missing: DiffEntry[];
+  size_mismatch: DiffEntry[];
+  extra: DiffEntry[];
+  missing_count: number;
+  missing_file_count: number;
+  missing_bytes: number;
+  mismatch_count: number;
+  mismatch_bytes: number;
+  extra_count: number;
+  truncated: boolean;
+}
+export interface CopySummary {
+  copied: number;
+  failed: number;
+  bytes_copied: number;
+  errors: string[];
+  cancelled: boolean;
+  needs_rescan: boolean;
+}
+export interface CopyProgress {
+  done: number;
+  total: number;
+  bytes_done: number;
+  bytes_total: number;
+  current: string;
+}
+export const onCopyProgress = (cb: (p: CopyProgress) => void): Promise<UnlistenFn> =>
+  listen<CopyProgress>("compare-copy-progress", (e) => cb(e.payload));
 export const onIndexProgress = (cb: (p: IndexProgress) => void): Promise<UnlistenFn> =>
   listen<IndexProgress>("index-progress", (e) => cb(e.payload));

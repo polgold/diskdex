@@ -1389,14 +1389,18 @@ pub struct DiskDiff {
     pub size_mismatch: Vec<DiffEntry>,
     /// Presentes en destino y ausentes en origen (informativo).
     pub extra: Vec<DiffEntry>,
+    /// Misma ruta pero de distinto tipo: archivo de un lado, carpeta del otro.
+    /// El mirror no los toca, así que hay que resolverlos a mano.
+    pub conflicts: Vec<DiffEntry>,
     pub missing_count: i64,
-    /// Solo los archivos faltantes: lo que realmente copia el mirror (las
-    /// carpetas se crean solas al copiar su contenido).
+    /// Solo los archivos faltantes. `missing_count` incluye las carpetas, pero
+    /// los bytes son únicamente de archivos: este contador es el que va con ellos.
     pub missing_file_count: i64,
     pub missing_bytes: i64,
     pub mismatch_count: i64,
     pub mismatch_bytes: i64,
     pub extra_count: i64,
+    pub conflict_count: i64,
     /// `true` si alguna lista se recortó a `limit` (los contadores son exactos).
     pub truncated: bool,
 }
@@ -1494,12 +1498,14 @@ pub fn compare_disks(
         missing: Vec::new(),
         size_mismatch: Vec::new(),
         extra: Vec::new(),
+        conflicts: Vec::new(),
         missing_count: 0,
         missing_file_count: 0,
         missing_bytes: 0,
         mismatch_count: 0,
         mismatch_bytes: 0,
         extra_count: 0,
+        conflict_count: 0,
         truncated: false,
     };
 
@@ -1523,9 +1529,25 @@ pub fn compare_disks(
                     diff.truncated = true;
                 }
             }
+            Some(dn) if node.is_folder != dn.is_folder => {
+                // Misma ruta ocupada por un archivo de un lado y una carpeta del
+                // otro. Copiar encima destruiría datos, así que solo lo reportamos.
+                diff.conflict_count += 1;
+                if diff.conflicts.len() < limit {
+                    diff.conflicts.push(DiffEntry {
+                        rel_path: rel.clone(),
+                        is_folder: node.is_folder,
+                        src_size: node.size,
+                        dst_size: dn.size,
+                        src_entry_id: node.entry_id,
+                    });
+                } else {
+                    diff.truncated = true;
+                }
+            }
             Some(dn) => {
                 // Solo los archivos se comparan por tamaño; las carpetas coinciden por existir.
-                if !node.is_folder && !dn.is_folder && node.size != dn.size {
+                if !node.is_folder && node.size != dn.size {
                     diff.mismatch_count += 1;
                     diff.mismatch_bytes += node.size;
                     if diff.size_mismatch.len() < limit {
@@ -1565,6 +1587,7 @@ pub fn compare_disks(
     diff.missing.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     diff.size_mismatch.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     diff.extra.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    diff.conflicts.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(diff)
 }
 
@@ -1577,15 +1600,25 @@ pub fn disk_rel_path_of(conn: &Connection, entry_id: i64) -> DbResult<String> {
     Ok(comps.join("/"))
 }
 
-/// Un archivo a copiar del origen al destino durante el mirror.
+/// Una entrada a materializar en el destino durante el mirror: un archivo a
+/// copiar, o una carpeta a crear.
 pub struct CopyItem {
     pub rel_path: String,
     pub size: i64,
+    /// Carpeta: se crea con `create_dir_all` en vez de copiarse.
+    pub is_folder: bool,
 }
 
-/// Plan de copia SIN recorte: todos los archivos (no carpetas) que faltan en el
-/// destino y, si `include_mismatch`, también los de tamaño distinto. Las
-/// carpetas se crean implícitamente al copiar los archivos que contienen.
+/// Plan de copia SIN recorte: todo lo que falta en el destino y, si
+/// `include_mismatch`, también los archivos de tamaño distinto.
+///
+/// Incluye las carpetas faltantes: las que tienen contenido nacerían igual del
+/// `create_dir_all` de sus archivos, pero las vacías no, y sin ellas el destino
+/// no quedaría idéntico al origen.
+///
+/// Las colisiones de tipo (archivo vs carpeta en la misma ruta) quedan afuera:
+/// copiar encima destruiría datos del destino.
+///
 /// `src_root`/`dst_root` acotan cada lado a una carpeta (None = disco entero).
 pub fn copy_plan(
     conn: &Connection,
@@ -1599,18 +1632,24 @@ pub fn copy_plan(
     let dst = disk_rel_index(conn, dst_id, dst_root)?;
     let mut out: Vec<CopyItem> = Vec::new();
     for (rel, node) in &src {
-        if node.is_folder {
-            continue;
-        }
         match dst.get(rel) {
-            None => out.push(CopyItem { rel_path: rel.clone(), size: node.size }),
+            None => out.push(CopyItem {
+                rel_path: rel.clone(),
+                // Los bytes del plan son solo de archivos, igual que `missing_bytes`.
+                size: if node.is_folder { 0 } else { node.size },
+                is_folder: node.is_folder,
+            }),
             Some(dn) => {
-                if include_mismatch && !dn.is_folder && dn.size != node.size {
-                    out.push(CopyItem { rel_path: rel.clone(), size: node.size });
+                if node.is_folder != dn.is_folder {
+                    continue; // colisión de tipo: no la tocamos
+                }
+                if include_mismatch && !node.is_folder && dn.size != node.size {
+                    out.push(CopyItem { rel_path: rel.clone(), size: node.size, is_folder: false });
                 }
             }
         }
     }
+    // Orden por ruta: garantiza que una carpeta se cree antes que su contenido.
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(out)
 }
@@ -1695,11 +1734,11 @@ mod tests {
         }
     }
 
-    /// `missing_count` incluye carpetas, pero el mirror solo copia archivos (las
-    /// carpetas nacen del `create_dir_all`). `missing_file_count` es el número
-    /// que la UI ofrece copiar, y tiene que coincidir con el plan de copia.
+    /// `missing_count` cuenta carpetas y archivos, y el plan materializa todo:
+    /// el número que la UI ofrece copiar tiene que coincidir con el plan.
+    /// `missing_file_count` y `missing_bytes` son la parte de archivos.
     #[test]
-    fn missing_file_count_excludes_folders_and_matches_copy_plan() {
+    fn copy_plan_covers_every_missing_entry_including_folders() {
         let mut conn = open_in_memory().unwrap();
         ingest_disks(&mut conn, &[sample_disk(), empty_backup_disk()]).unwrap();
         let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
@@ -1708,11 +1747,76 @@ mod tests {
         let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
         // 3 faltantes: la carpeta CLIP + sus 2 archivos.
         assert_eq!(diff.missing_count, 3);
-        // Pero solo 2 se copian.
         assert_eq!(diff.missing_file_count, 2);
 
         let plan = copy_plan(&conn, src_id, dst_id, None, None, false).unwrap();
-        assert_eq!(plan.len() as i64, diff.missing_file_count);
+        assert_eq!(plan.len() as i64, diff.missing_count);
+        // La carpeta va primero: se crea antes que su contenido.
+        assert_eq!(plan[0].rel_path, "CLIP");
+        assert!(plan[0].is_folder);
+        assert_eq!(plan[0].size, 0);
+    }
+
+    /// Origen con una carpeta vacía: sin archivos adentro que la creen de rebote,
+    /// el plan la tiene que incluir igual o el destino no queda idéntico.
+    #[test]
+    fn empty_folders_are_mirrored() {
+        let mut conn = open_in_memory().unwrap();
+        let src_disk = DcmfDisk {
+            name: "CONVACIA".into(),
+            entries: vec![
+                DcmfEntry { name: "CONVACIA".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                DcmfEntry { name: "VACIA".into(), parent: 0, is_folder: true, is_volume: false, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+            ],
+        };
+        ingest_disks(&mut conn, &[src_disk, empty_backup_disk()]).unwrap();
+        let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='CONVACIA'", [], |r| r.get(0)).unwrap();
+        let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='VACIO'", [], |r| r.get(0)).unwrap();
+
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        assert_eq!(diff.missing_count, 1);
+        assert_eq!(diff.missing_file_count, 0); // no hay archivos, solo la carpeta
+
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, false).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].rel_path, "VACIA");
+        assert!(plan[0].is_folder);
+    }
+
+    /// Destino donde «CLIP» es un archivo y no una carpeta: colisión de tipo.
+    fn clash_disk() -> DcmfDisk {
+        DcmfDisk {
+            name: "CLASH".into(),
+            entries: vec![
+                DcmfEntry { name: "CLASH".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                DcmfEntry { name: "CLIP".into(), parent: 0, is_folder: false, is_volume: false, size_logical: 42, size_physical: 42, created: 0, modified: 0 },
+            ],
+        }
+    }
+
+    /// Archivo de un lado y carpeta del otro en la misma ruta: se reporta como
+    /// conflicto, no como coincidencia, y el mirror jamás lo pisa.
+    #[test]
+    fn type_collisions_are_reported_and_never_copied_over() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_disks(&mut conn, &[sample_disk(), clash_disk()]).unwrap();
+        let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
+        let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='CLASH'", [], |r| r.get(0)).unwrap();
+
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        // CLIP: carpeta en el origen, archivo en el destino.
+        assert_eq!(diff.conflict_count, 1);
+        assert_eq!(diff.conflicts[0].rel_path, "CLIP");
+        assert!(diff.conflicts[0].is_folder); // el tipo del origen
+        assert_eq!(diff.conflicts[0].dst_size, 42);
+        // No se cuela como coincidencia silenciosa ni como diferencia de tamaño.
+        assert_eq!(diff.mismatch_count, 0);
+
+        // El plan no toca CLIP ni con include_mismatch: pisarlo destruiría datos.
+        for include_mismatch in [false, true] {
+            let plan = copy_plan(&conn, src_id, dst_id, None, None, include_mismatch).unwrap();
+            assert!(plan.iter().all(|c| c.rel_path != "CLIP"));
+        }
     }
 
     #[test]

@@ -348,12 +348,14 @@ export interface DiskDiff {
   missing: DiffEntry[];
   size_mismatch: DiffEntry[];
   extra: DiffEntry[];
+  conflicts: DiffEntry[];
   missing_count: number;
   missing_file_count: number;
   missing_bytes: number;
   mismatch_count: number;
   mismatch_bytes: number;
   extra_count: number;
+  conflict_count: number;
   truncated: boolean;
 }
 export interface CopySummary {

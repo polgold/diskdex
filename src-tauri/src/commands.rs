@@ -679,6 +679,22 @@ fn run_copy(
 
         on_progress(i as i64, bytes_copied, &item.rel_path);
 
+        // Carpeta: la creamos explícitamente. Las que tienen contenido igual
+        // nacerían del create_dir_all de abajo, pero las vacías no, y el destino
+        // tiene que quedar idéntico al origen.
+        if item.is_folder {
+            match std::fs::create_dir_all(&dst_path) {
+                Ok(()) => copied += 1,
+                Err(e) => {
+                    failed += 1;
+                    if errors.len() < 50 {
+                        errors.push(format!("{}: {e}", item.rel_path));
+                    }
+                }
+            }
+            continue;
+        }
+
         if let Some(parent) = dst_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 failed += 1;
@@ -731,8 +747,8 @@ mod copy_tests {
         std::fs::create_dir_all(&dst).unwrap();
 
         let plan = vec![
-            db::CopyItem { rel_path: "CLIP/A.MP4".into(), size: 11 },
-            db::CopyItem { rel_path: "README.txt".into(), size: 3 },
+            db::CopyItem { rel_path: "CLIP/A.MP4".into(), size: 11, is_folder: false },
+            db::CopyItem { rel_path: "README.txt".into(), size: 3, is_folder: false },
         ];
         let summary = run_copy(&plan, &src, &dst, 2, 14, || false, |_, _, _| {});
 
@@ -746,6 +762,27 @@ mod copy_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Una carpeta vacía del origen no tiene archivos que la creen de rebote:
+    /// el mirror la tiene que crear igual para que el destino quede idéntico.
+    #[test]
+    fn run_copy_creates_empty_folders() {
+        let base = std::env::temp_dir().join(format!("diskdex_emptydir_{}", std::process::id()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(src.join("VACIA")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let plan = vec![db::CopyItem { rel_path: "VACIA".into(), size: 0, is_folder: true }];
+        let summary = run_copy(&plan, &src, &dst, 1, 0, || false, |_, _, _| {});
+
+        assert_eq!(summary.copied, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.bytes_copied, 0);
+        assert!(dst.join("VACIA").is_dir());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn run_copy_honors_cancellation() {
         let base = std::env::temp_dir().join(format!("diskdex_canceltest_{}", std::process::id()));
@@ -756,7 +793,7 @@ mod copy_tests {
         std::fs::write(src.join("A.bin"), b"x").unwrap();
         std::fs::create_dir_all(&dst).unwrap();
 
-        let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 1 }];
+        let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 1, is_folder: false }];
         // Cancelado desde el arranque: no copia nada.
         let summary = run_copy(&plan, &src, &dst, 1, 1, || true, |_, _, _| {});
         assert!(summary.cancelled);

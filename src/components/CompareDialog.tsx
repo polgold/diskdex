@@ -152,9 +152,21 @@ function ScopePicker({
 }
 
 /** Lista scrollable de diferencias (rutas relativas al subárbol comparado). */
-function DiffList({ entries, count, kind }: { entries: DiffEntry[]; count: number; kind: "missing" | "mismatch" | "extra" }) {
+function DiffList({
+  entries,
+  count,
+  kind,
+}: {
+  entries: DiffEntry[];
+  count: number;
+  kind: "missing" | "mismatch" | "extra" | "conflict";
+}) {
   const t = useT();
   const hidden = count - entries.length;
+
+  // En un conflicto no hay tamaños que comparar: lo que cambia es el tipo.
+  // `is_folder` es el del origen, así que el destino es siempre el opuesto.
+  const typeLabel = (isFolder: boolean) => (isFolder ? t("compare.folder") : t("compare.file"));
   return (
     <div className="max-h-40 overflow-auto rounded border border-border bg-neutral-950/40">
       {entries.map((e) => (
@@ -164,9 +176,11 @@ function DiffList({ entries, count, kind }: { entries: DiffEntry[]; count: numbe
             {e.rel_path}
           </span>
           <span className="shrink-0 text-neutral-500">
-            {kind === "mismatch"
-              ? `${formatBytes(e.dst_size)} → ${formatBytes(e.src_size)}`
-              : formatBytes(kind === "extra" ? e.dst_size : e.src_size)}
+            {kind === "conflict"
+              ? `${typeLabel(e.is_folder)} → ${typeLabel(!e.is_folder)}`
+              : kind === "mismatch"
+                ? `${formatBytes(e.dst_size)} → ${formatBytes(e.src_size)}`
+                : formatBytes(kind === "extra" ? e.dst_size : e.src_size)}
           </span>
         </div>
       ))}
@@ -209,9 +223,9 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   const sameScope = ready && src.diskId === dst.diskId && src.rootId === dst.rootId;
   const bothOnline = !!srcDisk?.is_online && !!dstDisk?.is_online;
 
-  // Solo archivos: las carpetas faltantes se crean al copiar su contenido, así
-  // que contarlas inflaría el número que ofrece el botón de copia.
-  const toCopyCount = diff ? diff.missing_file_count + (includeMismatch ? diff.mismatch_count : 0) : 0;
+  // Todo lo faltante, carpetas incluidas: el mirror las crea para que el destino
+  // quede idéntico. Los conflictos de tipo no entran (nunca se copian encima).
+  const toCopyCount = diff ? diff.missing_count + (includeMismatch ? diff.mismatch_count : 0) : 0;
   const toCopyBytes = diff ? diff.missing_bytes + (includeMismatch ? diff.mismatch_bytes : 0) : 0;
 
   const scopeLabel = (s: Scope) =>
@@ -287,7 +301,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
 
       {diff && (
         <div className="space-y-4">
-          {diff.missing_count === 0 && diff.mismatch_count === 0 ? (
+          {diff.missing_count === 0 && diff.mismatch_count === 0 && diff.conflict_count === 0 ? (
             <p className="rounded border border-emerald-800/50 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-300">
               {t("compare.identical")}
             </p>
@@ -310,6 +324,16 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
                     {t("compare.filesCount", { count: formatCount(diff.mismatch_count) })}
                   </h3>
                   <DiffList entries={diff.size_mismatch} count={diff.mismatch_count} kind="mismatch" />
+                </section>
+              )}
+              {diff.conflict_count > 0 && (
+                <section>
+                  <h3 className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-orange-300">
+                    <FileWarning className="h-3.5 w-3.5" /> {t("compare.conflicts")} ·{" "}
+                    {t("compare.itemsCount", { count: formatCount(diff.conflict_count) })}
+                  </h3>
+                  <p className="mb-1.5 text-[11px] text-neutral-500">{t("compare.conflictHint")}</p>
+                  <DiffList entries={diff.conflicts} count={diff.conflict_count} kind="conflict" />
                 </section>
               )}
               {diff.extra_count > 0 && (

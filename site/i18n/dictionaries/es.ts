@@ -156,11 +156,11 @@ const es = {
     sub: "Descarga gratuita para macOS y Windows. Sin cuenta, sin nube obligatoria: tu catálogo vive en tu máquina.",
     mac: "Descargar para macOS",
     win: "Descargar para Windows",
-    macMeta: "Universal · Apple Silicon + Intel",
+    macMeta: "macOS · Intel 64-bit (corre en Apple Silicon vía Rosetta)",
     winMeta: "Windows 10 / 11 · 64-bit",
     soon: "Próximamente",
     soonNote:
-      "Estamos preparando el primer binario público. Mientras tanto, seguí el repo para enterarte del lanzamiento.",
+      "El build de Windows está en camino. Mientras tanto, seguí el repo para enterarte cuando salga.",
     repo: "Ver el código en GitHub",
     note: "Open source · el catálogo nunca sale de tu equipo salvo que vos lo decidas.",
   },

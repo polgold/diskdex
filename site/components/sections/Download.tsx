@@ -6,12 +6,13 @@ import { IconApple, IconWindows, IconGithub } from "@/components/Icons";
 
 export function Download({ dict }: { dict: Dictionary }) {
   const { download } = dict;
-  const { available, mac, win } = site.downloads;
+  const { mac, win } = site.downloads;
 
   const platforms = [
-    { key: "mac", href: mac, Icon: IconApple, label: download.mac, meta: download.macMeta },
-    { key: "win", href: win, Icon: IconWindows, label: download.win, meta: download.winMeta },
+    { key: "mac", ...mac, Icon: IconApple, label: download.mac, meta: download.macMeta },
+    { key: "win", ...win, Icon: IconWindows, label: download.win, meta: download.winMeta },
   ];
+  const someSoon = platforms.some((p) => !p.available);
 
   return (
     <section id="download" className="scroll-mt-24 py-20 lg:py-28">
@@ -32,7 +33,7 @@ export function Download({ dict }: { dict: Dictionary }) {
           </p>
 
           <div className="relative mx-auto mt-9 flex max-w-xl flex-col gap-3 sm:flex-row sm:justify-center">
-            {platforms.map(({ key, href, Icon, label, meta }) => (
+            {platforms.map(({ key, href, available, Icon, label, meta }) => (
               <div key={key} className="flex-1">
                 <ButtonLink
                   href={href}
@@ -50,7 +51,7 @@ export function Download({ dict }: { dict: Dictionary }) {
             ))}
           </div>
 
-          {!available && (
+          {someSoon && (
             <p className="relative mx-auto mt-7 max-w-md text-[0.9rem] leading-relaxed text-muted">
               {download.soonNote}
             </p>

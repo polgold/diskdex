@@ -464,6 +464,14 @@ export const useCatalog = create<CatalogState>((set, get) => ({
       if (remaining.length > 0) {
         await get().switchCatalog(remaining[remaining.length - 1].path);
       } else {
+        // Último catálogo abierto: cerrarlo de verdad en el backend consolida el
+        // WAL dentro del .dccat. Si no, el catálogo queda repartido en dos
+        // archivos y Dropbox los sincroniza por separado.
+        try {
+          await api.closeCatalog();
+        } catch {
+          /* el dato ya está commiteado; no bloquear el cierre en la UI */
+        }
         set({ catalogPath: null, disks: [], ...RESET_NAV });
       }
     }

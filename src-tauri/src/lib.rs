@@ -85,6 +85,7 @@ pub fn run() {
             commands::dcmf_disk_names,
             commands::import_dcmf_merge,
             commands::open_catalog,
+            commands::close_catalog,
             commands::list_disks,
             commands::disk_detail,
             commands::list_children,
@@ -144,6 +145,19 @@ pub fn run() {
             commands::ai_transcribe_disk,
             commands::ai_search_transcripts,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Al salir de verdad (no al cerrar la ventana, que solo la esconde en
+            // el tray) hay que consolidar el WAL dentro del .dccat. Si no, el
+            // catálogo queda repartido en dos archivos y Dropbox los sincroniza
+            // por separado, que es como se corrompe en la otra máquina.
+            if let tauri::RunEvent::Exit = event {
+                let state = app.state::<commands::AppState>();
+                let guard = state.catalog.lock().unwrap();
+                if let Some(cat) = guard.as_ref() {
+                    commands::checkpoint_quietly(&cat.conn, &cat.path);
+                }
+            }
+        });
 }

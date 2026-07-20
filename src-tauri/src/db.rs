@@ -243,6 +243,23 @@ pub fn open(path: &Path) -> DbResult<Connection> {
     Ok(conn)
 }
 
+/// Consolida el WAL dentro del `.dccat` y lo trunca a cero.
+///
+/// En modo WAL lo recién escrito vive en `<catálogo>.dccat-wal` hasta que ocurre
+/// un checkpoint. Es durable igual, pero deja el catálogo repartido en dos
+/// archivos que tienen que mantenerse mutuamente consistentes — y estos
+/// catálogos viven en Dropbox, que los sincroniza por separado. Un `.dccat`
+/// autocontenido es lo único que se puede sincronizar sin riesgo.
+///
+/// TRUNCATE (en vez de PASSIVE) espera a que no haya lectores y deja el `-wal`
+/// en cero, así Dropbox no sube 300 MB de sidecar. Si hay otra conexión
+/// leyendo, SQLite devuelve "busy": no es un error que valga la pena propagar
+/// —el dato ya está a salvo—, así que se reporta y se sigue.
+pub fn checkpoint(conn: &Connection) -> DbResult<()> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
 /// Abre un catálogo en memoria (para tests).
 pub fn open_in_memory() -> DbResult<Connection> {
     let conn = Connection::open_in_memory()?;
@@ -618,17 +635,29 @@ pub fn ingest_scanned(
     // Sin fingerprint —típico en exFAT/NTFS de Windows, que no exponen un UUID
     // vía `diskutil`— caemos al nombre del volumen entre los discos también sin
     // fingerprint, para no acumular un duplicado en cada re-escaneo.
+    // Con fingerprint también hay que adoptar las filas del MISMO volumen que no
+    // tengan uuid: un disco importado de un .dcmf entra sin él (el formato no lo
+    // trae), así que al escanearlo después —ya con uuid— no matcheaba contra su
+    // propia fila importada y se duplicaba en la lista. Solo se adoptan filas con
+    // uuid NULL: dos discos que tengan uuid distinto nunca se mezclan aunque
+    // compartan nombre.
     let old_ids: Vec<i64> = {
-        let (sql, key): (&str, &str) = match volume_uuid {
-            Some(uuid) => ("SELECT id FROM disks WHERE volume_uuid = ?1", uuid),
-            None => (
-                "SELECT id FROM disks WHERE volume_uuid IS NULL AND name = ?1",
-                disk.name.as_str(),
-            ),
-        };
-        let mut stmt = tx.prepare(sql)?;
-        let ids = stmt.query_map(params![key], |r| r.get::<_, i64>(0))?;
-        ids.collect::<Result<_, _>>()?
+        let mut ids: Vec<i64> = Vec::new();
+        if let Some(uuid) = volume_uuid {
+            let mut stmt = tx.prepare("SELECT id FROM disks WHERE volume_uuid = ?1")?;
+            for id in stmt.query_map(params![uuid], |r| r.get::<_, i64>(0))? {
+                ids.push(id?);
+            }
+        }
+        let mut stmt =
+            tx.prepare("SELECT id FROM disks WHERE volume_uuid IS NULL AND name = ?1")?;
+        for id in stmt.query_map(params![disk.name.as_str()], |r| r.get::<_, i64>(0))? {
+            let id = id?;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
     };
     // A2-preserve: snapshotear el enriquecimiento (hash/GPS) de los discos viejos
     // ANTES de borrarlos, para restaurarlo en los archivos que no cambiaron.
@@ -3237,6 +3266,46 @@ mod tests {
         // El FTS no quedó con fantasmas del disco viejo.
         let res = search(&conn, "C0001", 10).unwrap();
         assert_eq!(res.total, 1);
+    }
+
+    /// El flujo real que duplicaba: primero se importa el disco de un .dcmf de
+    /// DiskCatalogMaker (sin volume_uuid, el formato no lo trae) y después se
+    /// escanea el disco físico, que sí tiene uuid. El escaneo tiene que adoptar
+    /// la fila importada en vez de crear una segunda entrada con el mismo nombre.
+    #[test]
+    fn scan_adopts_row_imported_without_fingerprint() {
+        let mut conn = open_in_memory().unwrap();
+        // Import estilo .dcmf: sin uuid.
+        ingest_disks(&mut conn, &[sample_disk()]).unwrap();
+        let before: i64 = conn.query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0)).unwrap();
+        assert_eq!(before, 1);
+
+        // Ahora se escanea el disco físico: ya trae Volume UUID.
+        let r = ingest_scanned(
+            &mut conn, &sample_disk(), Some("UUID-SF28"), "ssd", None, "/Volumes/SF28", None,
+        )
+        .unwrap();
+        assert!(r.replaced, "debe reemplazar la fila importada, no insertar otra");
+
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 1, "no debe quedar duplicado");
+        let uuid: Option<String> = conn
+            .query_row("SELECT volume_uuid FROM disks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uuid.as_deref(), Some("UUID-SF28"), "la fila queda con el uuid del escaneo");
+        // El FTS no quedó con fantasmas de la fila importada.
+        assert_eq!(search(&conn, "C0001", 10).unwrap().total, 1);
+    }
+
+    /// Dos discos distintos que comparten nombre pero tienen uuid propio no se
+    /// mezclan: solo se adoptan filas cuyo uuid es NULL.
+    #[test]
+    fn scan_never_merges_disks_with_different_fingerprints() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-A"), "ssd", None, "/Volumes/A", None).unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-B"), "ssd", None, "/Volumes/B", None).unwrap();
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 2, "mismo nombre pero uuid distinto = discos distintos");
     }
 
     #[test]

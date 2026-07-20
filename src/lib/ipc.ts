@@ -265,6 +265,8 @@ export const api = {
     invoke<ImportSummary>("import_dcmf_merge", { dcmfPath, replace }),
 
   openCatalog: (catalogPath: string) => invoke<void>("open_catalog", { catalogPath }),
+  /** Consolida el WAL dentro del .dccat y suelta la conexión (importante en Dropbox). */
+  closeCatalog: () => invoke<void>("close_catalog"),
 
   listDisks: () => invoke<DiskRow[]>("list_disks"),
   diskDetail: (diskId: number) => invoke<DiskDetail>("disk_detail", { diskId }),

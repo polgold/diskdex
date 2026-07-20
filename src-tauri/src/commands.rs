@@ -26,8 +26,7 @@ pub struct AppState {
 }
 
 pub struct Catalog {
-    /// Ruta del `.dccat` abierto (se usará al reabrir/exportar — M7).
-    #[allow(dead_code)]
+    /// Ruta del `.dccat` abierto (se reporta al consolidar el WAL).
     pub path: PathBuf,
     pub conn: Connection,
 }
@@ -413,7 +412,36 @@ pub fn import_dcmf_merge(
 pub fn open_catalog(state: tauri::State<'_, AppState>, catalog_path: String) -> Result<(), String> {
     let cat_path = PathBuf::from(&catalog_path);
     let conn = db::open(&cat_path).map_err(|e| format!("error abriendo catálogo: {e}"))?;
-    *state.catalog.lock().unwrap() = Some(Catalog { path: cat_path, conn });
+    let mut guard = state.catalog.lock().unwrap();
+    // Consolidar el WAL del catálogo que se deja antes de soltarlo.
+    if let Some(prev) = guard.as_ref() {
+        checkpoint_quietly(&prev.conn, &prev.path);
+    }
+    *guard = Some(Catalog { path: cat_path, conn });
+    Ok(())
+}
+
+/// Consolida el WAL y reporta sin cortar el flujo. Fallar acá no pone en riesgo
+/// los datos (ya están commiteados); solo deja el `-wal` sin truncar, así que no
+/// vale la pena propagar el error a una acción que para el usuario ya terminó.
+pub fn checkpoint_quietly(conn: &Connection, path: &std::path::Path) {
+    if let Err(e) = db::checkpoint(conn) {
+        eprintln!("no se pudo consolidar el WAL de {}: {e}", path.display());
+    }
+}
+
+/// Cierra el catálogo abierto: consolida el WAL dentro del `.dccat` y suelta la
+/// conexión. Importa porque estos catálogos suelen vivir en Dropbox: mientras el
+/// `-wal` tenga datos, el `.dccat` por sí solo está incompleto y sincronizar los
+/// dos archivos por separado puede dejar el catálogo inconsistente en la otra
+/// máquina.
+#[tauri::command(async)]
+pub fn close_catalog(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.catalog.lock().unwrap();
+    if let Some(cat) = guard.as_ref() {
+        checkpoint_quietly(&cat.conn, &cat.path);
+    }
+    *guard = None; // drop → cierra la conexión SQLite
     Ok(())
 }
 

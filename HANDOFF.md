@@ -1,6 +1,6 @@
 # HANDOFF — qué hay en este repo y dónde vive cada cosa
 
-> Actualizado: 2026-07-20 (post-sincronización de las dos máquinas). Para retomar el
+> Actualizado: 2026-07-20 (post-unificación de backup-compare). Para retomar el
 > trabajo en cualquier computadora después de `git clone` / `git pull`.
 
 ## TL;DR
@@ -19,15 +19,25 @@ Un solo repo (**ahora PÚBLICO**): https://github.com/polgold/diskdex (remoto `o
   reverse-geocode offline, luz/atardecer por posición solar, búsqueda NL vía Claude API,
   gather multi-disco) **y** el M9 hecho en la otra máquina (comparación de discos +
   mirror). `site/` **no existe** en esta rama.
-  - ⚠️ **Deuda: features hermanas duplicadas.** Las dos máquinas implementaron backup-compare
-    en paralelo: botón **"Backup"** (B1/B2, `BackupAuditDialog`, compara por hash BLAKE3,
-    comandos `compare_backup`/`copy_missing`) y botón **"Comparar"** (M9, `CompareDialog`,
-    comandos `compare_disks`/`mirror_copy_missing`/`mirror_cancel_copy`). En el merge se
-    conservaron AMBAS (los comandos del M9 se renombraron `mirror_*` porque chocaban).
-    Conviene unificarlas en una sola UI. Verificado post-merge: 79 tests Rust + 22 vitest + `tsc`.
+  - ✅ **Backup-compare unificado** (2026-07-20). Las dos máquinas habían implementado la
+    feature en paralelo y el merge dejó ambas; ahora hay una sola: botón **"Comparar"**
+    (`CompareDialog`) con selector de criterio **Rápido** (tamaño) / **Profundo** (hash
+    BLAKE3). Comandos: `compare_disks` y `copy_missing`, ambos con flag `deep`; se cancela
+    con `cancel_copy(dst_disk_id)` (el mismo mecanismo que gather).
+    - La copia es **atómica y verificada por hash** en los dos modos (`scan::copy_file_verified`):
+      antes el mirror hacía `fs::copy` directo y pisaba el destino sin verificar.
+    - Un destino ocupado **solo se reemplaza si el plan lo marcó** (`CopyItem.overwrite`),
+      para que un catálogo desactualizado no borre datos.
+    - `db::classify` es la única fuente de verdad: la usan tanto lo que se muestra
+      (`compare_disks`) como lo que se copia (`copy_plan`).
+    - Verificado: 80 tests Rust + 22 vitest + `tsc` limpio.
 - **`feat/website`** — nace de `690730e` y agrega `site/`. **No incluye** los commits
   nuevos de `main`; para tocar la app hacelo desde `main`. Cuando el sitio se dé por
   estable, mergear a `main` (o configurar Vercel para deployar desde `main`).
+  - ⚠️ El merge `ac2d028` había colado en `main` 80 MB de artefactos (`site/.next/`,
+    `site/.vercel/`) sin ningún archivo fuente del sitio. Se quitaron del índice en
+    `cd51dd6` y el `.gitignore` de la raíz ahora los bloquea. **Siguen en el historial**
+    (no se reescribió), así que un clone completo todavía los baja.
 - **`fix/duplicados-firmlink-inode`** — rama vieja de una auditoría, **no mergeada**.
   Revisar vigencia antes de retomarla.
 - Tag **`v0.1.0`** → release https://github.com/polgold/diskdex/releases/tag/v0.1.0
@@ -93,7 +103,6 @@ aarch64-apple-darwin` y `./scripts/fetch-ffmpeg.sh all-macos`.
 
 ## Pendientes conocidos
 
-- **Unificar** las dos features de backup-compare (ver Ramas → `main`).
 - **Build Windows** (`.exe`/`.msi`): no existe; necesita runner Windows o GitHub Actions
   (recomendado: workflow con 3 runners — macOS Intel, macOS ARM, Windows — que suba
   instaladores al release en cada tag).

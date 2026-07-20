@@ -57,10 +57,6 @@ export async function generateMetadata({
       title: dict.meta.title,
       description: dict.meta.description,
     },
-    icons: {
-      icon: "/icon.png",
-      apple: "/apple-icon.png",
-    },
   };
 }
 

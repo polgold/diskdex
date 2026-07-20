@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open, save, confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { HardDrive, Database, Import, FolderOpen, Loader2, ScanLine, Usb, X, Share2, Languages } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -187,7 +187,7 @@ function App() {
         const existing = new Set(useCatalog.getState().disks.map((d) => d.name));
         const conflicts = names.filter((n) => existing.has(n));
         if (conflicts.length > 0) {
-          replace = window.confirm(t("app.importConflict", { disks: conflicts.join(", ") }));
+          replace = await confirmDialog(t("app.importConflict", { disks: conflicts.join(", ") }));
         }
       } catch {
         /* si falla el preview, importa igual sin reemplazar */

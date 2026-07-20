@@ -28,6 +28,7 @@ import {
 import { formatBytes, formatCount } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { Modal } from "./StatsDialog";
+import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 /** Un lado de la comparación: disco + carpeta raíz opcional (subárbol). */
 interface Scope {
@@ -305,7 +306,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
 
   async function runCopy() {
     if (!ready || !diff) return;
-    const ok = window.confirm(
+    const ok = await confirmDialog(
       t("compare.confirm", { count: formatCount(toCopyCount), size: formatBytes(toCopyBytes) }),
     );
     if (!ok) return;

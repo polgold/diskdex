@@ -23,6 +23,7 @@ import { formatBytes, formatDate, formatCount, formatAge, formatDuration } from 
 import { api, type SearchItem, type SemanticItem, type EntryRow, type DiskDetail } from "../lib/ipc";
 import { revealOriginal, openOriginal, copyText } from "../lib/actions";
 import { useT, useI18n } from "../lib/i18n";
+import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 /** Firma de la función de traducción (para pasarla a helpers fuera de componentes). */
 type TFn = (key: string, vars?: Record<string, string | number>) => string;
@@ -173,7 +174,7 @@ export async function trashIds(
   } else {
     confirmMsg = t("table.confirmTrashMany", { n: ids.length });
   }
-  if (!window.confirm(confirmMsg)) return;
+  if (!(await confirmDialog(confirmMsg))) return;
   try {
     const res = await api.moveEntriesToTrash(ids);
     await reload();

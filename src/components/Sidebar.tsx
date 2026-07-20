@@ -3,6 +3,7 @@ import { ChevronRight, Folder, HardDrive, ScanLine, Trash2 } from "lucide-react"
 import { api, type EntryRow, type VolumeInfo, type DiskRow } from "../lib/ipc";
 import { useCatalog, type Crumb } from "../store/catalog";
 import { useT } from "../lib/i18n";
+import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 type DiskStatus = "upToDate" | "changed" | "offline";
 
@@ -100,7 +101,7 @@ function DiskMenu({
 
   async function remove() {
     onClose();
-    const ok = window.confirm(t("sidebar.removeConfirm", { name: menu.disk.name }));
+    const ok = await confirmDialog(t("sidebar.removeConfirm", { name: menu.disk.name }));
     if (!ok) return;
     try {
       await api.deleteDisk(menu.disk.id);

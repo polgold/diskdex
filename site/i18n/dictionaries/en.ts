@@ -158,11 +158,11 @@ const en: Dictionary = {
     sub: "Free download for macOS and Windows. No account, no mandatory cloud: your catalog lives on your machine.",
     mac: "Download for macOS",
     win: "Download for Windows",
-    macMeta: "Universal · Apple Silicon + Intel",
+    macMeta: "macOS · Intel 64-bit (runs on Apple Silicon via Rosetta)",
     winMeta: "Windows 10 / 11 · 64-bit",
     soon: "Coming soon",
     soonNote:
-      "We're preparing the first public binary. In the meantime, follow the repo to hear about the launch.",
+      "The Windows build is on the way. In the meantime, follow the repo to hear when it ships.",
     repo: "View the code on GitHub",
     note: "Open source · your catalog never leaves your machine unless you decide otherwise.",
   },

@@ -792,6 +792,10 @@ pub struct CopySummary {
     pub cancelled: bool,
     /// El catálogo del destino quedó desactualizado: conviene re-escanear.
     pub needs_rescan: bool,
+    /// (ruta relativa, tamaño, es_carpeta) de lo efectivamente escrito. Se usa
+    /// para actualizar el catálogo del destino; no viaja al frontend.
+    #[serde(skip)]
+    pub copied_items: Vec<(String, i64, bool)>,
 }
 
 /// Lee mount_path + online + nombre de un disco.
@@ -880,6 +884,7 @@ pub async fn copy_missing(
             errors: Vec::new(),
             cancelled: false,
             needs_rescan: false,
+            copied_items: Vec::new(),
         });
     }
 
@@ -911,6 +916,24 @@ pub async fn copy_missing(
     .map_err(|e| e.to_string())?;
 
     clear_copy_cancel(&cancel_key);
+
+    // Anotar en el catálogo del destino lo que se acaba de escribir. Sin esto,
+    // volver a comparar seguiría mostrando como faltantes archivos que ya están
+    // en el disco, y la única salida era re-escanear el disco entero.
+    if !summary.copied_items.is_empty() {
+        let mut guard = state.catalog.lock().unwrap();
+        if let Some(cat) = guard.as_mut() {
+            if let Err(e) = db::register_copied(
+                &mut cat.conn,
+                dst_disk_id,
+                dst_root_id,
+                &summary.copied_items,
+            ) {
+                // Que falle el registro no invalida la copia: los archivos están.
+                eprintln!("no se pudo actualizar el catálogo del destino: {e}");
+            }
+        }
+    }
     Ok(summary)
 }
 
@@ -934,6 +957,7 @@ fn run_copy(
     let mut skipped = 0i64;
     let mut errors: Vec<String> = Vec::new();
     let mut cancelled = false;
+    let mut copied_items: Vec<(String, i64, bool)> = Vec::new();
 
     for (i, item) in plan.iter().enumerate() {
         if is_cancelled() {
@@ -952,7 +976,10 @@ fn run_copy(
         // tiene que quedar idéntico al origen.
         if item.is_folder {
             match std::fs::create_dir_all(&dst_path) {
-                Ok(()) => copied += 1,
+                Ok(()) => {
+                    copied += 1;
+                    copied_items.push((item.rel_path.clone(), 0, true));
+                }
                 Err(e) => {
                     failed += 1;
                     if errors.len() < 50 {
@@ -979,6 +1006,7 @@ fn run_copy(
                 copied += 1;
                 verified += 1;
                 bytes_copied += n as i64;
+                copied_items.push((item.rel_path.clone(), n as i64, false));
             }
             Err(e) => {
                 failed += 1;
@@ -999,7 +1027,8 @@ fn run_copy(
         skipped,
         errors,
         cancelled,
-        needs_rescan: copied > 0,
+        needs_rescan: false, // el catálogo se actualiza solo (ver register_copied)
+        copied_items,
     }
 }
 
@@ -1028,7 +1057,12 @@ mod copy_tests {
         assert_eq!(summary.copied, 2);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.bytes_copied, 14);
-        assert!(summary.needs_rescan);
+        // Lo copiado se reporta para que `copy_missing` lo anote en el catálogo
+        // del destino: por eso ya no hace falta re-escanear el disco.
+        assert!(!summary.needs_rescan);
+        let rutas: Vec<&str> = summary.copied_items.iter().map(|(r, _, _)| r.as_str()).collect();
+        assert!(rutas.contains(&"CLIP/A.MP4"));
+        assert!(rutas.contains(&"README.txt"));
         // El árbol se reprodujo en el destino con el contenido correcto.
         assert_eq!(std::fs::read(dst.join("CLIP/A.MP4")).unwrap(), b"hello world");
         assert_eq!(std::fs::read(dst.join("README.txt")).unwrap(), b"doc");

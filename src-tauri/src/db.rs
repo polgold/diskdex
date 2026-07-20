@@ -2440,6 +2440,137 @@ pub fn compare_disks(
     Ok(diff)
 }
 
+/// Registra en el catálogo del disco destino los archivos que la copia acaba de
+/// escribir, creando las carpetas intermedias que hagan falta.
+///
+/// Sin esto, el catálogo del destino queda desactualizado apenas termina de
+/// copiar y volver a comparar sigue mostrando como faltantes archivos que YA
+/// están en el disco: la comparación es offline (lee el catálogo), así que la
+/// única forma de corregirla era re-escanear el disco entero. Y no hace falta,
+/// porque la app sabe exactamente qué copió.
+///
+/// `dst_root` es la entrada raíz del subárbol destino (None = raíz del disco).
+/// Las rutas son relativas a ese root, igual que en el plan de copia.
+/// Devuelve cuántas entradas nuevas se insertaron.
+pub fn register_copied(
+    conn: &mut Connection,
+    disk_id: i64,
+    dst_root: Option<i64>,
+    // (ruta relativa, tamaño, es_carpeta) de lo efectivamente copiado.
+    copied: &[(String, i64, bool)],
+) -> DbResult<usize> {
+    use std::collections::HashMap;
+    let tx = conn.transaction()?;
+
+    let root_id = match dst_root {
+        Some(id) => id,
+        None => match tx.query_row(
+            "SELECT id FROM entries WHERE disk_id = ?1 AND parent_id IS NULL",
+            params![disk_id],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(id) => id,
+            Err(_) => return Ok(0), // disco sin catalogar: nada que actualizar
+        },
+    };
+
+    // Cache ruta→id para no consultar el mismo padre una vez por archivo.
+    let mut dirs: HashMap<String, i64> = HashMap::new();
+    dirs.insert(String::new(), root_id);
+
+    /// Devuelve el id de la carpeta `rel`, creándola (y a sus ancestros) si falta.
+    fn dir_id(
+        tx: &rusqlite::Transaction<'_>,
+        disk_id: i64,
+        dirs: &mut HashMap<String, i64>,
+        rel: &str,
+    ) -> DbResult<i64> {
+        if let Some(&id) = dirs.get(rel) {
+            return Ok(id);
+        }
+        let (parent_rel, name) = match rel.rfind('/') {
+            Some(i) => (&rel[..i], &rel[i + 1..]),
+            None => ("", rel),
+        };
+        let parent = dir_id(tx, disk_id, dirs, parent_rel)?;
+        // ¿Ya existe? (una carpeta puede haber sido creada por el escaneo previo)
+        let found: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM entries WHERE disk_id = ?1 AND parent_id = ?2 AND name = ?3 AND is_folder = 1",
+                params![disk_id, parent, name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let id = match found {
+            Some(id) => id,
+            None => {
+                tx.execute(
+                    "INSERT INTO entries (disk_id, parent_id, name, is_folder, size_logical, size_physical) \
+                     VALUES (?1, ?2, ?3, 1, 0, 0)",
+                    params![disk_id, parent, name],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        dirs.insert(rel.to_string(), id);
+        Ok(id)
+    }
+
+    let mut inserted = 0usize;
+    for (rel, size, is_folder) in copied {
+        if *is_folder {
+            dir_id(&tx, disk_id, &mut dirs, rel)?;
+            continue;
+        }
+        let (parent_rel, name) = match rel.rfind('/') {
+            Some(i) => (&rel[..i], &rel[i + 1..]),
+            None => ("", rel.as_str()),
+        };
+        let parent = dir_id(&tx, disk_id, &mut dirs, parent_rel)?;
+        // Si ya estaba (por ejemplo un reemplazo), solo se actualiza el tamaño.
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM entries WHERE disk_id = ?1 AND parent_id = ?2 AND name = ?3 AND is_folder = 0",
+                params![disk_id, parent, name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
+        match existing {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE entries SET size_logical = ?1, size_physical = ?1 WHERE id = ?2",
+                    params![size, id],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO entries (disk_id, parent_id, name, is_folder, size_logical, size_physical, ext) \
+                     VALUES (?1, ?2, ?3, 0, ?4, ?4, ?5)",
+                    params![disk_id, parent, name, size, ext],
+                )?;
+                let id = tx.last_insert_rowid();
+                // Mantener el índice de búsqueda al día.
+                tx.execute(
+                    "INSERT INTO entries_fts(rowid, name) VALUES (?1, ?2)",
+                    params![id, name],
+                )?;
+                inserted += 1;
+            }
+        }
+    }
+
+    // Los totales del disco cambiaron.
+    tx.execute(
+        "UPDATE disks SET file_count = (SELECT COUNT(*) FROM entries WHERE disk_id = ?1 AND is_folder = 0), \
+                          folder_count = (SELECT COUNT(*) FROM entries WHERE disk_id = ?1 AND is_folder = 1) \
+         WHERE id = ?1",
+        params![disk_id],
+    )?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
 /// Una carpeta que contiene archivos faltantes, con el total acumulado de todo
 /// su subárbol. Es lo que la UI necesita para ofrecer "copiá esta carpeta sí,
 /// esta no" sin tener que traerse cientos de miles de rutas.
@@ -3379,6 +3510,60 @@ mod tests {
         assert_eq!(uuid.as_deref(), Some("UUID-SF28"), "la fila queda con el uuid del escaneo");
         // El FTS no quedó con fantasmas de la fila importada.
         assert_eq!(search(&conn, "C0001", 10).unwrap().total, 1);
+    }
+
+    /// El caso que motivó todo: después de copiar, volver a comparar tiene que
+    /// mostrar 0 faltantes SIN re-escanear el disco destino. Antes la copia no
+    /// tocaba el catálogo, así que el destino seguía "sin" archivos que ya
+    /// estaban en el disco y había que re-escanearlo entero para verlo.
+    #[test]
+    fn registering_copies_clears_missing_without_rescan() {
+        let mut conn = open_in_memory().unwrap();
+        let folder = |name: &str, parent: i32| DcmfEntry {
+            name: name.into(), parent, is_folder: true, is_volume: parent < 0,
+            size_logical: 0, size_physical: 0, created: 0, modified: 0,
+        };
+        let file = |name: &str, parent: i32, size: u64| DcmfEntry {
+            name: name.into(), parent, is_folder: false, is_volume: false,
+            size_logical: size, size_physical: size, created: 0, modified: 0,
+        };
+        let src = DcmfDisk {
+            name: "SRC".into(),
+            entries: vec![
+                folder("SRC", -1), folder("NOA", 0), folder("CLIP", 1),
+                file("a.mp4", 2, 100), file("b.mp4", 2, 50),
+            ],
+        };
+        ingest_scanned(&mut conn, &src, Some("U-S"), "ssd", None, "/Volumes/S", None).unwrap();
+        let dst = DcmfDisk { name: "DST".into(), entries: vec![folder("DST", -1)] };
+        ingest_scanned(&mut conn, &dst, Some("U-D"), "ssd", None, "/Volumes/D", None).unwrap();
+        let s: i64 = conn.query_row("SELECT id FROM disks WHERE name='SRC'", [], |r| r.get(0)).unwrap();
+        let d: i64 = conn.query_row("SELECT id FROM disks WHERE name='DST'", [], |r| r.get(0)).unwrap();
+
+        let antes = compare_disks(&conn, s, d, None, None, CompareMode::Fast, 1000).unwrap();
+        assert_eq!(antes.missing_file_count, 2);
+
+        // Simular lo que devuelve run_copy tras copiar ambos archivos.
+        let copiado = vec![
+            ("NOA".to_string(), 0, true),
+            ("NOA/CLIP".to_string(), 0, true),
+            ("NOA/CLIP/a.mp4".to_string(), 100, false),
+            ("NOA/CLIP/b.mp4".to_string(), 50, false),
+        ];
+        let n = register_copied(&mut conn, d, None, &copiado).unwrap();
+        assert_eq!(n, 2, "se insertan los 2 archivos (las carpetas no cuentan)");
+
+        let despues = compare_disks(&conn, s, d, None, None, CompareMode::Fast, 1000).unwrap();
+        assert_eq!(despues.missing_file_count, 0, "ya no falta nada, sin re-escanear");
+        assert_eq!(despues.ok_count, 2);
+
+        // Idempotente: registrar de nuevo no duplica entradas.
+        let n2 = register_copied(&mut conn, d, None, &copiado).unwrap();
+        assert_eq!(n2, 0);
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries WHERE disk_id = ?1 AND is_folder = 0", params![d], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
     }
 
     /// El filtro por carpeta tiene que cortar por componente de ruta: si elegís

@@ -2632,6 +2632,9 @@ pub fn missing_tree(
     src_root: Option<i64>,
     dst_root: Option<i64>,
     mode: CompareMode,
+    // Igual que en copy_plan: sin esto el árbol contaría cosas que la copia no
+    // va a tocar, y los totales del botón no cuadrarían con lo que pasa.
+    include_mismatch: bool,
 ) -> DbResult<Vec<MissingNode>> {
     use std::collections::HashMap;
     let src = disk_rel_index(conn, src_id, src_root)?;
@@ -2644,7 +2647,7 @@ pub fn missing_tree(
         }
         let falta = match dst.get(rel) {
             None => true,
-            Some(dn) => matches!(classify(node, dn, mode), Verdict::Mismatch),
+            Some(dn) => include_mismatch && matches!(classify(node, dn, mode), Verdict::Mismatch),
         };
         if !falta {
             continue;
@@ -3692,8 +3695,36 @@ mod tests {
 
         let s: i64 = conn.query_row("SELECT id FROM disks WHERE name='SRC'", [], |r| r.get(0)).unwrap();
         let d: i64 = conn.query_row("SELECT id FROM disks WHERE name='DST'", [], |r| r.get(0)).unwrap();
-        let tree = missing_tree(&conn, s, d, None, None, CompareMode::Fast).unwrap();
+        let tree = missing_tree(&conn, s, d, None, None, CompareMode::Fast, false).unwrap();
         let get = |p: &str| tree.iter().find(|n| n.rel_path == p).expect(p);
+
+        // Un archivo que existe en el destino con otro tamaño solo cuenta como
+        // "por copiar" si se pidió reemplazar los que difieren: el árbol tiene
+        // que contar lo mismo que va a copiar copy_plan, ni más ni menos.
+        {
+            let mut c2 = open_in_memory().unwrap();
+            let a = DcmfDisk {
+                name: "A".into(),
+                entries: vec![folder("A", -1), file("x.mp4", 0, 200)],
+            };
+            let b = DcmfDisk {
+                name: "B".into(),
+                entries: vec![folder("B", -1), file("x.mp4", 0, 100)], // mismo nombre, otro tamaño
+            };
+            ingest_scanned(&mut c2, &a, Some("UA"), "ssd", None, "/Volumes/A", None).unwrap();
+            ingest_scanned(&mut c2, &b, Some("UB"), "ssd", None, "/Volumes/B", None).unwrap();
+            let ia: i64 = c2.query_row("SELECT id FROM disks WHERE name='A'", [], |r| r.get(0)).unwrap();
+            let ib: i64 = c2.query_row("SELECT id FROM disks WHERE name='B'", [], |r| r.get(0)).unwrap();
+
+            let sin = missing_tree(&c2, ia, ib, None, None, CompareMode::Fast, false).unwrap();
+            assert_eq!(sin.iter().find(|n| n.rel_path == "").map(|n| n.files), None,
+                "sin reemplazar, no hay nada por copiar");
+            let con = missing_tree(&c2, ia, ib, None, None, CompareMode::Fast, true).unwrap();
+            assert_eq!(con.iter().find(|n| n.rel_path == "").unwrap().files, 1);
+            // Y coincide con el plan real.
+            let plan = copy_plan(&c2, ia, ib, None, None, CompareMode::Fast, true, &[]).unwrap();
+            assert_eq!(plan.iter().filter(|c| !c.is_folder).count(), 1);
+        }
 
         assert_eq!((get("").files, get("").bytes), (2, 150), "la raíz junta todo");
         assert_eq!((get("NOA").files, get("NOA").bytes), (2, 150));

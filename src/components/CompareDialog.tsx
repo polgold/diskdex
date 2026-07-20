@@ -319,16 +319,34 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       setDiff(d);
       // Árbol de faltantes por carpeta: exacto, sin el recorte del diff.
       setSelected(new Set([""]));
-      if (d.missing_count > 0) {
-        setTree(await api.missingTree(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep));
-      } else {
-        setTree([]);
-      }
+      await loadTree(d, includeMismatch);
     } catch (e) {
       setError(String(e));
     } finally {
       setComparing(false);
     }
+  }
+
+  // El árbol tiene que reflejar exactamente lo que se va a copiar, así que se
+  // vuelve a pedir cuando cambia "reemplazar los que difieren".
+  async function loadTree(d: DiskDiff, withMismatch: boolean) {
+    if (d.missing_count === 0 && !(withMismatch && d.mismatch_count > 0)) {
+      setTree([]);
+      return;
+    }
+    try {
+      setTree(
+        await api.missingTree(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep, withMismatch),
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function toggleMismatch(on: boolean) {
+    setIncludeMismatch(on);
+    setSelected(new Set([""]));
+    if (diff) void loadTree(diff, on);
   }
 
   async function runCopy() {
@@ -412,11 +430,11 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       {/* Zona de copia: va ARRIBA de las listas. Con miles de diferencias, dejarla
           al final la escondía debajo de un scroll larguísimo y no se entendía por
           qué no se podía copiar. La acción y su motivo de bloqueo van juntos. */}
-      {diff && toCopyCount > 0 && (
+      {diff && (diff.missing_count > 0 || diff.mismatch_count > 0) && (
         <div className="mb-4 space-y-2 rounded-lg border border-border bg-neutral-950/40 p-3">
           {diff.mismatch_count > 0 && (
             <label className="flex items-center gap-2 text-xs text-neutral-300">
-              <input type="checkbox" checked={includeMismatch} onChange={(e) => setIncludeMismatch(e.target.checked)} />
+              <input type="checkbox" checked={includeMismatch} onChange={(e) => toggleMismatch(e.target.checked)} />
               {t("compare.includeMismatch")}
             </label>
           )}

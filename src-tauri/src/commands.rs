@@ -753,6 +753,7 @@ pub fn missing_tree(
     src_root_id: Option<i64>,
     dst_root_id: Option<i64>,
     deep: bool,
+    include_mismatch: bool,
 ) -> Result<Vec<db::MissingNode>, String> {
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
@@ -763,6 +764,7 @@ pub fn missing_tree(
         src_root_id,
         dst_root_id,
         compare_mode(deep),
+        include_mismatch,
     )
     .map_err(|e| e.to_string())
 }

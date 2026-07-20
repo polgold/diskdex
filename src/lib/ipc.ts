@@ -377,7 +377,11 @@ export const api = {
     srcRootId: number | null,
     dstRootId: number | null,
     deep: boolean,
-  ) => invoke<MissingNode[]>("missing_tree", { srcDiskId, dstDiskId, srcRootId, dstRootId, deep }),
+    includeMismatch: boolean,
+  ) =>
+    invoke<MissingNode[]>("missing_tree", {
+      srcDiskId, dstDiskId, srcRootId, dstRootId, deep, includeMismatch,
+    }),
 
   // M5 — escaneo / detección de discos
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),

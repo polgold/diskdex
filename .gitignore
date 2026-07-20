@@ -39,3 +39,9 @@ dist-ssr
 
 # ffmpeg/ffprobe sidecars (estáticos, pesados — se bajan con scripts/fetch-ffmpeg.sh)
 /src-tauri/binaries/
+
+# Sitio web (vive en la rama feat/website). Artefactos de build y link a Vercel:
+# nunca van al repo — un merge los coló una vez y metió 80 MB de basura.
+/site/.next/
+/site/.vercel/
+/site/next-env.d.ts

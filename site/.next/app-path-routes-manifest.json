@@ -1,9 +1,0 @@
-{
-  "/manifest.webmanifest/route": "/manifest.webmanifest",
-  "/robots.txt/route": "/robots.txt",
-  "/icon.svg/route": "/icon.svg",
-  "/sitemap.xml/route": "/sitemap.xml",
-  "/_not-found/page": "/_not-found",
-  "/[locale]/opengraph-image/route": "/[locale]/opengraph-image",
-  "/[locale]/page": "/[locale]"
-}

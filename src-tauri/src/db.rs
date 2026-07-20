@@ -2173,6 +2173,38 @@ pub struct DiskDiff {
     pub truncated: bool,
 }
 
+/// Metadata que el sistema operativo genera solo y regenera al toque: nunca es
+/// contenido que valga la pena respaldar, y ensucia la comparación —llegó a
+/// encabezar la lista de faltantes con miles de `.DS_Store`, empujando los
+/// archivos reales fuera de la vista y del recorte de resultados.
+///
+/// Se descarta al construir el índice, así que comparar, el árbol de faltantes
+/// y el plan de copia coinciden sin poder desincronizarse entre sí.
+fn is_os_noise(name: &str) -> bool {
+    // AppleDouble: el "._archivo" que macOS crea junto a cada archivo en discos
+    // no-HFS (exFAT/NTFS) para guardar atributos extendidos.
+    if name.starts_with("._") {
+        return true;
+    }
+    matches!(
+        name,
+        ".DS_Store"
+            | ".Spotlight-V100"
+            | ".fseventsd"
+            | ".TemporaryItems"
+            | ".DocumentRevisions-V100"
+            | ".Trashes"
+            | ".Trash"
+            | ".apdisk"
+            | ".VolumeIcon.icns"
+            | ".com.apple.timemachine.donotpresent"
+            | "System Volume Information"
+            | "$RECYCLE.BIN"
+            | "Thumbs.db"
+            | "desktop.ini"
+    )
+}
+
 /// Nodo del índice de rutas relativas de un disco.
 struct RelNode {
     is_folder: bool,
@@ -2287,6 +2319,11 @@ fn disk_rel_index(
             }
         }
         if !in_subtree {
+            continue;
+        }
+        // Basta con que un componente sea ruido para descartar la entrada y todo
+        // lo que cuelgue de ella (p. ej. el contenido de .Spotlight-V100).
+        if comps.iter().any(|c| is_os_noise(c)) {
             continue;
         }
         comps.reverse(); // [raíz…, a, b, archivo] (o [a, b, archivo] si hay root_id)
@@ -3510,6 +3547,51 @@ mod tests {
         assert_eq!(uuid.as_deref(), Some("UUID-SF28"), "la fila queda con el uuid del escaneo");
         // El FTS no quedó con fantasmas de la fila importada.
         assert_eq!(search(&conn, "C0001", 10).unwrap().total, 1);
+    }
+
+    /// La basura del sistema no debe aparecer en la comparación ni copiarse:
+    /// llegó a encabezar la lista de faltantes con miles de `.DS_Store`.
+    #[test]
+    fn os_noise_is_excluded_from_compare_and_plan() {
+        let mut conn = open_in_memory().unwrap();
+        let folder = |name: &str, parent: i32| DcmfEntry {
+            name: name.into(), parent, is_folder: true, is_volume: parent < 0,
+            size_logical: 0, size_physical: 0, created: 0, modified: 0,
+        };
+        let file = |name: &str, parent: i32, size: u64| DcmfEntry {
+            name: name.into(), parent, is_folder: false, is_volume: false,
+            size_logical: size, size_physical: size, created: 0, modified: 0,
+        };
+        // SRC trae un archivo real y varios tipos de ruido; DST está vacío.
+        let src = DcmfDisk {
+            name: "SRC".into(),
+            entries: vec![
+                folder("SRC", -1), folder("CLIP", 0),
+                file("real.mp4", 1, 100),
+                file(".DS_Store", 1, 6),
+                file("._real.mp4", 1, 4),
+                folder(".Spotlight-V100", 0),
+                file("indice.db", 3, 999), // cuelga del .Spotlight-V100
+            ],
+        };
+        ingest_scanned(&mut conn, &src, Some("U-S"), "ssd", None, "/Volumes/S", None).unwrap();
+        let dst = DcmfDisk { name: "DST".into(), entries: vec![folder("DST", -1)] };
+        ingest_scanned(&mut conn, &dst, Some("U-D"), "ssd", None, "/Volumes/D", None).unwrap();
+        let s: i64 = conn.query_row("SELECT id FROM disks WHERE name='SRC'", [], |r| r.get(0)).unwrap();
+        let d: i64 = conn.query_row("SELECT id FROM disks WHERE name='DST'", [], |r| r.get(0)).unwrap();
+
+        let diff = compare_disks(&conn, s, d, None, None, CompareMode::Fast, 1000).unwrap();
+        assert_eq!(diff.missing_file_count, 1, "solo el archivo real falta");
+        assert_eq!(diff.missing_bytes, 100, "el ruido tampoco suma bytes");
+        assert!(diff.missing.iter().all(|e| !e.rel_path.contains(".DS_Store")));
+        assert!(diff.missing.iter().all(|e| !e.rel_path.contains("._")));
+        assert!(diff.missing.iter().all(|e| !e.rel_path.contains("Spotlight")));
+
+        // Y no se copia: el plan tiene que ignorarlo igual que la comparación.
+        let plan = copy_plan(&conn, s, d, None, None, CompareMode::Fast, false, &[]).unwrap();
+        assert!(plan.iter().all(|c| !c.rel_path.contains(".DS_Store")));
+        assert!(plan.iter().all(|c| !c.rel_path.contains("Spotlight")));
+        assert!(plan.iter().any(|c| c.rel_path == "CLIP/real.mp4"));
     }
 
     /// El caso que motivó todo: después de copiar, volver a comparar tiene que

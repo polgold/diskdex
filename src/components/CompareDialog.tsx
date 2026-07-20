@@ -397,6 +397,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
         <p className="text-[11px] text-neutral-500">
           {deep ? t("compare.modeDeepHelp") : t("compare.modeFastHelp")}
         </p>
+        <p className="text-[11px] text-neutral-600">{t("compare.ignoresNoise")}</p>
       </div>
 
       <button

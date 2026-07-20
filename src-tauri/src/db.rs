@@ -1970,160 +1970,6 @@ pub fn duplicates(conn: &Connection, min_size: i64, limit: i64) -> DbResult<Vec<
     Ok(out)
 }
 
-// ─────────────────────────── Auditoría de backup (B1) ───────────────────────────
-//
-// Compara dos subárboles del catálogo (source vs destination) y reporta qué archivos
-// del source faltan / difieren / no se pueden verificar en el destino. OFFLINE: opera
-// sobre el catálogo, no necesita los discos montados. La identidad de "mismo archivo"
-// es la RUTA RELATIVA al root elegido; la verificación de contenido usa el hash BLAKE3
-// (poblado por el escaneo enriquecido, A2). Sin hash → se cae a comparación por tamaño.
-
-/// Referencia a un archivo del source para mostrar/accionar en el reporte.
-#[derive(Debug, Clone, Serialize)]
-pub struct FileRef {
-    pub entry_id: i64,
-    pub rel_path: String,
-    pub name: String,
-    pub size: i64,
-}
-
-/// Resultado de comparar un subárbol source contra uno destination.
-#[derive(Debug, Clone, Serialize)]
-pub struct BackupReport {
-    /// Archivos del source presentes en dest y verificados por hash idéntico.
-    pub ok: u64,
-    /// Archivos del source que NO existen en dest (mismo rel_path no encontrado).
-    pub missing: Vec<FileRef>,
-    /// Existen en dest con el mismo rel_path pero contenido distinto (hash difiere)
-    /// o tamaño distinto sin hash → copia parcial/corrupta/versión vieja.
-    pub mismatch: Vec<FileRef>,
-    /// Existen en dest con el mismo rel_path y tamaño, pero falta hash de algún lado
-    /// → presentes pero NO verificados por contenido.
-    pub unverified: Vec<FileRef>,
-    /// Cantidad de archivos en dest que no están en source (informativo).
-    pub extra: u64,
-    /// Bytes lógicos de los archivos faltantes (para estimar la copia).
-    pub missing_bytes: i64,
-    /// Total de archivos del source comparados.
-    pub source_total: u64,
-    /// true si no falta nada y nada difiere (lo `unverified` no bloquea, pero la UI lo muestra).
-    pub fully_backed_up: bool,
-}
-
-/// Archivo de un subárbol con su ruta relativa al root elegido.
-struct SubtreeFile {
-    entry_id: i64,
-    rel_path: String,
-    name: String,
-    size: i64,
-    hash: Option<String>,
-}
-
-/// Entrada raíz (volumen) de un disco: la fila sin padre.
-pub fn disk_root_entry(conn: &Connection, disk_id: i64) -> DbResult<Option<i64>> {
-    conn.query_row(
-        "SELECT id FROM entries WHERE disk_id = ?1 AND parent_id IS NULL",
-        params![disk_id],
-        |r| r.get(0),
-    )
-    .optional()
-}
-
-/// Todos los ARCHIVOS (no carpetas) descendientes de `root_entry`, con su ruta
-/// relativa al root (el root queda como ""). Descenso por CTE recursiva usando el
-/// índice (disk_id, parent_id).
-fn collect_subtree_files(conn: &Connection, root_entry: i64) -> DbResult<Vec<SubtreeFile>> {
-    let disk_id: i64 =
-        conn.query_row("SELECT disk_id FROM entries WHERE id = ?1", params![root_entry], |r| r.get(0))?;
-    let mut stmt = conn.prepare(
-        "WITH RECURSIVE sub(id, name, is_folder, size_logical, content_hash, rel) AS (
-           SELECT id, name, is_folder, size_logical, content_hash, ''
-             FROM entries WHERE id = ?1
-           UNION ALL
-           SELECT e.id, e.name, e.is_folder, e.size_logical, e.content_hash,
-                  CASE WHEN s.rel = '' THEN e.name ELSE s.rel || '/' || e.name END
-             FROM entries e JOIN sub s ON e.parent_id = s.id
-            WHERE e.disk_id = ?2
-         )
-         SELECT id, rel, name, size_logical, content_hash FROM sub WHERE is_folder = 0",
-    )?;
-    let rows = stmt.query_map(params![root_entry, disk_id], |r| {
-        Ok(SubtreeFile {
-            entry_id: r.get(0)?,
-            rel_path: r.get(1)?,
-            name: r.get(2)?,
-            size: r.get(3)?,
-            hash: r.get(4)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Compara el subárbol `source_root` contra `dest_root` (ids de entrada raíz).
-/// Nota de rendimiento: carga ambos subárboles en memoria (HashMap por rel_path).
-/// Apto para comparar carpetas de proyecto / tarjetas; para discos enteros de
-/// millones de archivos puede ser pesado (aceptable para B1).
-pub fn compare_subtrees(conn: &Connection, source_root: i64, dest_root: i64) -> DbResult<BackupReport> {
-    use std::collections::{HashMap, HashSet};
-
-    let src = collect_subtree_files(conn, source_root)?;
-    let dst = collect_subtree_files(conn, dest_root)?;
-
-    let to_ref = |f: &SubtreeFile| FileRef {
-        entry_id: f.entry_id,
-        rel_path: f.rel_path.clone(),
-        name: f.name.clone(),
-        size: f.size,
-    };
-
-    let mut dest_by_rel: HashMap<&str, &SubtreeFile> = HashMap::with_capacity(dst.len());
-    for d in &dst {
-        dest_by_rel.insert(d.rel_path.as_str(), d);
-    }
-    let src_rels: HashSet<&str> = src.iter().map(|f| f.rel_path.as_str()).collect();
-
-    let mut ok: u64 = 0;
-    let mut missing: Vec<FileRef> = Vec::new();
-    let mut mismatch: Vec<FileRef> = Vec::new();
-    let mut unverified: Vec<FileRef> = Vec::new();
-    let mut missing_bytes: i64 = 0;
-
-    for f in &src {
-        match dest_by_rel.get(f.rel_path.as_str()) {
-            None => {
-                missing_bytes += f.size.max(0);
-                missing.push(to_ref(f));
-            }
-            Some(d) => match (f.hash.as_deref(), d.hash.as_deref()) {
-                (Some(a), Some(b)) if a == b => ok += 1,
-                (Some(_), Some(_)) => mismatch.push(to_ref(f)), // hashes difieren
-                _ => {
-                    // Falta hash de algún lado: no verificable por contenido.
-                    if f.size == d.size {
-                        unverified.push(to_ref(f)); // mismo tamaño, sin verificar
-                    } else {
-                        mismatch.push(to_ref(f)); // tamaño distinto → copia parcial/distinta
-                    }
-                }
-            },
-        }
-    }
-
-    let extra = dst.iter().filter(|d| !src_rels.contains(d.rel_path.as_str())).count() as u64;
-    let fully_backed_up = missing.is_empty() && mismatch.is_empty();
-
-    Ok(BackupReport {
-        ok,
-        missing,
-        mismatch,
-        unverified,
-        extra,
-        missing_bytes,
-        source_total: src.len() as u64,
-        fully_backed_up,
-    })
-}
-
 // ─────────────────────────── Plan de copia multi-disco (D) ───────────────────────────
 //
 // "Reuní todos los atardeceres" → los archivos elegidos viven en varios discos (varios
@@ -2266,13 +2112,17 @@ pub struct DiffEntry {
     pub src_entry_id: i64,
 }
 
-/// Resultado de comparar dos discos por ruta relativa + tamaño.
+/// Resultado de comparar dos subárboles (discos o carpetas).
 #[derive(Debug, Clone, Serialize)]
 pub struct DiskDiff {
     /// Presentes en origen y ausentes en destino (hay que copiarlos).
     pub missing: Vec<DiffEntry>,
-    /// Misma ruta en ambos pero distinto tamaño (copia incompleta/corrupta).
+    /// Misma ruta en ambos pero contenido distinto (copia incompleta/corrupta o
+    /// versión vieja). En modo rápido es "distinto tamaño"; en profundo, "distinto hash".
     pub size_mismatch: Vec<DiffEntry>,
+    /// Solo en modo profundo: misma ruta y mismo tamaño, pero falta el hash de
+    /// algún lado. Están presentes pero NO se pudo verificar el contenido.
+    pub unverified: Vec<DiffEntry>,
     /// Presentes en destino y ausentes en origen (informativo).
     pub extra: Vec<DiffEntry>,
     /// Misma ruta pero de distinto tipo: archivo de un lado, carpeta del otro.
@@ -2287,6 +2137,9 @@ pub struct DiskDiff {
     pub mismatch_bytes: i64,
     pub extra_count: i64,
     pub conflict_count: i64,
+    pub unverified_count: i64,
+    /// Archivos del origen presentes y verificados como idénticos en el destino.
+    pub ok_count: i64,
     /// `true` si alguna lista se recortó a `limit` (los contadores son exactos).
     pub truncated: bool,
 }
@@ -2296,6 +2149,62 @@ struct RelNode {
     is_folder: bool,
     size: i64,
     entry_id: i64,
+    /// BLAKE3 del contenido, si el escaneo enriquecido (A2) lo pobló.
+    hash: Option<String>,
+}
+
+/// Cómo se decide si dos archivos con la misma ruta son "el mismo".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareMode {
+    /// Solo tamaño. Instantáneo y siempre disponible, pero ciego a la corrupción
+    /// que preserva el tamaño (bit rot, copia truncada y rellenada).
+    Fast,
+    /// Hash BLAKE3. Detecta cualquier diferencia de contenido, pero exige que el
+    /// escaneo enriquecido haya hasheado ambos lados: sin hash cae a `Unverified`.
+    Deep,
+}
+
+/// Veredicto de comparar una ruta presente en ambos lados.
+enum Verdict {
+    /// Idénticos según el criterio elegido.
+    Same,
+    /// Difieren: el destino tiene una versión vieja, parcial o corrupta.
+    Mismatch,
+    /// Mismo tamaño pero sin hash de algún lado: presente, NO verificado.
+    /// Solo aparece en modo `Deep`.
+    Unverified,
+}
+
+/// Única fuente de verdad de la comparación: la usan tanto `compare_disks`
+/// (lo que se muestra) como `copy_plan` (lo que se copia), para que el plan no
+/// pueda desviarse de lo que el usuario vio en pantalla.
+fn classify(src: &RelNode, dst: &RelNode, mode: CompareMode) -> Verdict {
+    // Las carpetas coinciden por existir: no tienen contenido propio que comparar.
+    if src.is_folder {
+        return Verdict::Same;
+    }
+    match mode {
+        CompareMode::Fast => {
+            if src.size == dst.size {
+                Verdict::Same
+            } else {
+                Verdict::Mismatch
+            }
+        }
+        CompareMode::Deep => match (src.hash.as_deref(), dst.hash.as_deref()) {
+            (Some(a), Some(b)) if a == b => Verdict::Same,
+            (Some(_), Some(_)) => Verdict::Mismatch,
+            // Sin hash de algún lado no podemos afirmar nada del contenido. Un
+            // tamaño distinto ya alcanza para saber que difieren; uno igual, no.
+            _ => {
+                if src.size == dst.size {
+                    Verdict::Unverified
+                } else {
+                    Verdict::Mismatch
+                }
+            }
+        },
+    }
 }
 
 /// Construye un mapa `rutaRelativa -> nodo` para un disco, opcionalmente
@@ -2312,22 +2221,24 @@ fn disk_rel_index(
     // Cargamos todas las entradas del disco de una y armamos las rutas en
     // memoria (evita N consultas recursivas para discos con miles de archivos).
     let mut stmt = conn.prepare(
-        "SELECT id, parent_id, name, is_folder, size_logical FROM entries WHERE disk_id = ?1",
+        "SELECT id, parent_id, name, is_folder, size_logical, content_hash FROM entries WHERE disk_id = ?1",
     )?;
-    let rows: Vec<(i64, Option<i64>, String, i64, i64)> = stmt
-        .query_map([disk_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+    let rows: Vec<(i64, Option<i64>, String, i64, i64, Option<String>)> = stmt
+        .query_map([disk_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })?
         .collect::<Result<_, _>>()?;
 
     // id -> (parent, name)
     let mut nodes: std::collections::HashMap<i64, (Option<i64>, String)> =
         std::collections::HashMap::with_capacity(rows.len());
-    for (id, parent, name, _is_folder, _size) in &rows {
+    for (id, parent, name, _is_folder, _size, _hash) in &rows {
         nodes.insert(*id, (*parent, name.clone()));
     }
 
     let mut index: std::collections::HashMap<String, RelNode> =
         std::collections::HashMap::with_capacity(rows.len());
-    for (id, _parent, _name, is_folder, size) in rows {
+    for (id, _parent, _name, is_folder, size, hash) in rows {
         // Subimos por la cadena de padres acumulando nombres. Con `root_id` nos
         // detenemos al llegar a esa carpeta (sin incluir su nombre); si nunca la
         // alcanzamos, la entrada no está en el subárbol y se descarta.
@@ -2361,20 +2272,23 @@ fn disk_rel_index(
             }
             comps.join("/")
         };
-        index.insert(rel, RelNode { is_folder: is_folder != 0, size, entry_id: id });
+        index.insert(rel, RelNode { is_folder: is_folder != 0, size, entry_id: id, hash });
     }
     Ok(index)
 }
 
-/// Compara dos subárboles (discos o carpetas) por ruta relativa + tamaño.
+/// Compara dos subárboles (discos o carpetas) por ruta relativa. El criterio de
+/// igualdad lo define `mode`: tamaño (rápido) o hash BLAKE3 (profundo).
 /// `src_root`/`dst_root` acotan cada lado a una carpeta (None = disco entero).
 /// `limit` recorta cada lista devuelta a la UI; los contadores/bytes son exactos.
+/// OFFLINE: se resuelve contra el catálogo, sin montar los discos.
 pub fn compare_disks(
     conn: &Connection,
     src_id: i64,
     dst_id: i64,
     src_root: Option<i64>,
     dst_root: Option<i64>,
+    mode: CompareMode,
     limit: usize,
 ) -> DbResult<DiskDiff> {
     let src = disk_rel_index(conn, src_id, src_root)?;
@@ -2383,6 +2297,7 @@ pub fn compare_disks(
     let mut diff = DiskDiff {
         missing: Vec::new(),
         size_mismatch: Vec::new(),
+        unverified: Vec::new(),
         extra: Vec::new(),
         conflicts: Vec::new(),
         missing_count: 0,
@@ -2392,6 +2307,8 @@ pub fn compare_disks(
         mismatch_bytes: 0,
         extra_count: 0,
         conflict_count: 0,
+        unverified_count: 0,
+        ok_count: 0,
         truncated: false,
     };
 
@@ -2432,20 +2349,36 @@ pub fn compare_disks(
                 }
             }
             Some(dn) => {
-                // Solo los archivos se comparan por tamaño; las carpetas coinciden por existir.
-                if !node.is_folder && node.size != dn.size {
-                    diff.mismatch_count += 1;
-                    diff.mismatch_bytes += node.size;
-                    if diff.size_mismatch.len() < limit {
-                        diff.size_mismatch.push(DiffEntry {
-                            rel_path: rel.clone(),
-                            is_folder: false,
-                            src_size: node.size,
-                            dst_size: dn.size,
-                            src_entry_id: node.entry_id,
-                        });
-                    } else {
-                        diff.truncated = true;
+                let entry = || DiffEntry {
+                    rel_path: rel.clone(),
+                    is_folder: false,
+                    src_size: node.size,
+                    dst_size: dn.size,
+                    src_entry_id: node.entry_id,
+                };
+                match classify(node, dn, mode) {
+                    // Las carpetas coinciden por existir; el contador es de archivos.
+                    Verdict::Same => {
+                        if !node.is_folder {
+                            diff.ok_count += 1;
+                        }
+                    }
+                    Verdict::Mismatch => {
+                        diff.mismatch_count += 1;
+                        diff.mismatch_bytes += node.size;
+                        if diff.size_mismatch.len() < limit {
+                            diff.size_mismatch.push(entry());
+                        } else {
+                            diff.truncated = true;
+                        }
+                    }
+                    Verdict::Unverified => {
+                        diff.unverified_count += 1;
+                        if diff.unverified.len() < limit {
+                            diff.unverified.push(entry());
+                        } else {
+                            diff.truncated = true;
+                        }
                     }
                 }
             }
@@ -2472,6 +2405,7 @@ pub fn compare_disks(
     // Orden estable y útil: por ruta.
     diff.missing.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     diff.size_mismatch.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    diff.unverified.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     diff.extra.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     diff.conflicts.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(diff)
@@ -2493,6 +2427,10 @@ pub struct CopyItem {
     pub size: i64,
     /// Carpeta: se crea con `create_dir_all` en vez de copiarse.
     pub is_folder: bool,
+    /// El destino ya existe y hay que reemplazarlo (solo para `include_mismatch`).
+    /// Con `false`, encontrar el destino ocupado es motivo de saltear, nunca de
+    /// pisar: es la garantía de que una comparación desactualizada no borre datos.
+    pub overwrite: bool,
 }
 
 /// Plan de copia SIN recorte: todo lo que falta en el destino y, si
@@ -2512,6 +2450,7 @@ pub fn copy_plan(
     dst_id: i64,
     src_root: Option<i64>,
     dst_root: Option<i64>,
+    mode: CompareMode,
     include_mismatch: bool,
 ) -> DbResult<Vec<CopyItem>> {
     let src = disk_rel_index(conn, src_id, src_root)?;
@@ -2524,13 +2463,22 @@ pub fn copy_plan(
                 // Los bytes del plan son solo de archivos, igual que `missing_bytes`.
                 size: if node.is_folder { 0 } else { node.size },
                 is_folder: node.is_folder,
+                overwrite: false,
             }),
             Some(dn) => {
                 if node.is_folder != dn.is_folder {
                     continue; // colisión de tipo: no la tocamos
                 }
-                if include_mismatch && !node.is_folder && dn.size != node.size {
-                    out.push(CopyItem { rel_path: rel.clone(), size: node.size, is_folder: false });
+                // Lo "no verificado" nunca se copia: está presente y del mismo
+                // tamaño, y no tenemos evidencia de que difiera. Reemplazarlo
+                // sería trabajo (y riesgo) sin justificación.
+                if include_mismatch && matches!(classify(node, dn, mode), Verdict::Mismatch) {
+                    out.push(CopyItem {
+                        rel_path: rel.clone(),
+                        size: node.size,
+                        is_folder: false,
+                        overwrite: true,
+                    });
                 }
             }
         }
@@ -2589,7 +2537,7 @@ mod tests {
         let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
         let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='BACKUP'", [], |r| r.get(0)).unwrap();
 
-        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, CompareMode::Fast, 1000).unwrap();
         // Falta el archivo B-ROLL.MOV (la carpeta CLIP existe en ambos).
         assert_eq!(diff.missing_count, 1);
         assert_eq!(diff.missing[0].rel_path, "CLIP/B-ROLL.MOV");
@@ -2602,10 +2550,10 @@ mod tests {
         assert_eq!(diff.extra_count, 0);
 
         // El plan de copia con mismatch incluye ambos archivos.
-        let plan = copy_plan(&conn, src_id, dst_id, None, None, true).unwrap();
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, true).unwrap();
         assert_eq!(plan.len(), 2);
         // Sin mismatch, solo el faltante.
-        let plan_no_mm = copy_plan(&conn, src_id, dst_id, None, None, false).unwrap();
+        let plan_no_mm = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false).unwrap();
         assert_eq!(plan_no_mm.len(), 1);
         assert_eq!(plan_no_mm[0].rel_path, "CLIP/B-ROLL.MOV");
     }
@@ -2630,12 +2578,12 @@ mod tests {
         let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
         let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='VACIO'", [], |r| r.get(0)).unwrap();
 
-        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, CompareMode::Fast, 1000).unwrap();
         // 3 faltantes: la carpeta CLIP + sus 2 archivos.
         assert_eq!(diff.missing_count, 3);
         assert_eq!(diff.missing_file_count, 2);
 
-        let plan = copy_plan(&conn, src_id, dst_id, None, None, false).unwrap();
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false).unwrap();
         assert_eq!(plan.len() as i64, diff.missing_count);
         // La carpeta va primero: se crea antes que su contenido.
         assert_eq!(plan[0].rel_path, "CLIP");
@@ -2659,11 +2607,11 @@ mod tests {
         let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='CONVACIA'", [], |r| r.get(0)).unwrap();
         let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='VACIO'", [], |r| r.get(0)).unwrap();
 
-        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, CompareMode::Fast, 1000).unwrap();
         assert_eq!(diff.missing_count, 1);
         assert_eq!(diff.missing_file_count, 0); // no hay archivos, solo la carpeta
 
-        let plan = copy_plan(&conn, src_id, dst_id, None, None, false).unwrap();
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false).unwrap();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].rel_path, "VACIA");
         assert!(plan[0].is_folder);
@@ -2689,7 +2637,7 @@ mod tests {
         let src_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='SF28'", [], |r| r.get(0)).unwrap();
         let dst_id: i64 = conn.query_row("SELECT id FROM disks WHERE name='CLASH'", [], |r| r.get(0)).unwrap();
 
-        let diff = compare_disks(&conn, src_id, dst_id, None, None, 1000).unwrap();
+        let diff = compare_disks(&conn, src_id, dst_id, None, None, CompareMode::Fast, 1000).unwrap();
         // CLIP: carpeta en el origen, archivo en el destino.
         assert_eq!(diff.conflict_count, 1);
         assert_eq!(diff.conflicts[0].rel_path, "CLIP");
@@ -2700,7 +2648,7 @@ mod tests {
 
         // El plan no toca CLIP ni con include_mismatch: pisarlo destruiría datos.
         for include_mismatch in [false, true] {
-            let plan = copy_plan(&conn, src_id, dst_id, None, None, include_mismatch).unwrap();
+            let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, include_mismatch).unwrap();
             assert!(plan.iter().all(|c| c.rel_path != "CLIP"));
         }
     }
@@ -2716,7 +2664,7 @@ mod tests {
         let dst_clip: i64 = conn.query_row("SELECT id FROM entries WHERE disk_id=?1 AND name='CLIP'", [dst_id], |r| r.get(0)).unwrap();
 
         // Acotado a CLIP↔CLIP, las rutas son relativas a esa carpeta (sin prefijo "CLIP/").
-        let diff = compare_disks(&conn, src_id, dst_id, Some(src_clip), Some(dst_clip), 1000).unwrap();
+        let diff = compare_disks(&conn, src_id, dst_id, Some(src_clip), Some(dst_clip), CompareMode::Fast, 1000).unwrap();
         assert_eq!(diff.missing_count, 1);
         assert_eq!(diff.missing[0].rel_path, "B-ROLL.MOV");
         assert_eq!(diff.mismatch_count, 1);
@@ -3399,8 +3347,12 @@ mod tests {
             .unwrap();
     }
 
+    /// El caso que justifica que existan dos modos: A.mov tiene el MISMO tamaño
+    /// en ambos discos pero distinto contenido. El modo rápido lo da por bueno;
+    /// el profundo lo detecta. Es exactamente la corrupción silenciosa que un
+    /// backup por tamaño no ve.
     #[test]
-    fn compare_subtrees_classifies_files() {
+    fn deep_mode_catches_what_fast_mode_misses() {
         let mut conn = open_in_memory().unwrap();
         let folder = |name: &str, parent: i32| DcmfEntry {
             name: name.into(), parent, is_folder: true, is_volume: parent < 0,
@@ -3440,29 +3392,48 @@ mod tests {
 
         let src_disk: i64 = conn.query_row("SELECT id FROM disks WHERE name='SRC'", [], |r| r.get(0)).unwrap();
         let dst_disk: i64 = conn.query_row("SELECT id FROM disks WHERE name='DST'", [], |r| r.get(0)).unwrap();
-        let src_root = disk_root_entry(&conn, src_disk).unwrap().unwrap();
-        let dst_root = disk_root_entry(&conn, dst_disk).unwrap().unwrap();
+        // ── Modo profundo: ve la diferencia de contenido de A.mov ──
+        let deep =
+            compare_disks(&conn, src_disk, dst_disk, None, None, CompareMode::Deep, 1000).unwrap();
+        assert_eq!(deep.missing_count, 1, "B.mov falta");
+        assert_eq!(deep.missing[0].rel_path, "DCIM/B.mov");
+        assert_eq!(deep.missing_bytes, 200);
+        assert_eq!(deep.mismatch_count, 1, "A.mov difiere por hash");
+        assert_eq!(deep.size_mismatch[0].rel_path, "DCIM/A.mov");
+        assert_eq!(deep.unverified_count, 1, "C.mov presente, mismo tamaño, sin hash");
+        assert_eq!(deep.unverified[0].rel_path, "DCIM/C.mov");
+        assert_eq!(deep.ok_count, 0);
+        assert_eq!(deep.extra_count, 0);
 
-        let rep = compare_subtrees(&conn, src_root, dst_root).unwrap();
-        assert_eq!(rep.source_total, 3);
-        assert_eq!(rep.ok, 0);
-        assert_eq!(rep.missing.len(), 1, "B.mov falta");
-        assert_eq!(rep.missing[0].name, "B.mov");
-        assert_eq!(rep.missing[0].rel_path, "DCIM/B.mov");
-        assert_eq!(rep.missing_bytes, 200);
-        assert_eq!(rep.mismatch.len(), 1, "A.mov difiere por hash");
-        assert_eq!(rep.mismatch[0].name, "A.mov");
-        assert_eq!(rep.unverified.len(), 1, "C.mov presente, mismo tamaño, sin hash");
-        assert_eq!(rep.unverified[0].name, "C.mov");
-        assert_eq!(rep.extra, 0);
-        assert!(!rep.fully_backed_up);
+        // ── Modo rápido: A.mov y C.mov pasan como idénticos (mismo tamaño) ──
+        let fast =
+            compare_disks(&conn, src_disk, dst_disk, None, None, CompareMode::Fast, 1000).unwrap();
+        assert_eq!(fast.missing_count, 1, "B.mov falta en los dos modos");
+        assert_eq!(fast.mismatch_count, 0, "por tamaño, A.mov parece intacto");
+        assert_eq!(fast.unverified_count, 0, "la categoría solo existe en modo profundo");
+        assert_eq!(fast.ok_count, 2, "A.mov y C.mov dados por buenos");
 
-        // Comparar el source contra sí mismo → A y B verificados (OK), C sin hash queda unverified.
-        let same = compare_subtrees(&conn, src_root, src_root).unwrap();
-        assert_eq!(same.ok, 2);
-        assert_eq!(same.unverified.len(), 1);
-        assert!(same.missing.is_empty() && same.mismatch.is_empty());
-        assert!(same.fully_backed_up);
+        // El plan de copia respeta el modo: con include_mismatch, el profundo
+        // repone A.mov (marcado para reemplazo) y el rápido no lo toca.
+        let deep_plan =
+            copy_plan(&conn, src_disk, dst_disk, None, None, CompareMode::Deep, true).unwrap();
+        let a_mov: Vec<_> = deep_plan.iter().filter(|c| c.rel_path == "DCIM/A.mov").collect();
+        assert_eq!(a_mov.len(), 1);
+        assert!(a_mov[0].overwrite, "reemplazar exige marcar overwrite explícitamente");
+
+        let fast_plan =
+            copy_plan(&conn, src_disk, dst_disk, None, None, CompareMode::Fast, true).unwrap();
+        assert!(fast_plan.iter().all(|c| c.rel_path != "DCIM/A.mov"));
+
+        // Lo "no verificado" nunca se copia: está presente y no hay evidencia de
+        // que difiera, así que reemplazarlo sería riesgo sin justificación.
+        assert!(deep_plan.iter().all(|c| c.rel_path != "DCIM/C.mov"));
+
+        // Comparar el origen contra sí mismo: nada falta ni difiere en ningún
+        // modo; en profundo, C.mov sigue sin poder verificarse.
+        let same =
+            compare_disks(&conn, src_disk, src_disk, None, Some(1), CompareMode::Deep, 1000).unwrap();
+        assert_eq!(same.mismatch_count, 0);
     }
 
     #[test]

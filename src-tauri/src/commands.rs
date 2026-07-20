@@ -448,20 +448,6 @@ pub fn get_entry(
     db::get_entry(&cat.conn, entry_id).map_err(|e| e.to_string())
 }
 
-/// B1 — Auditoría de backup: compara dos subárboles del catálogo (source vs dest)
-/// y reporta qué archivos del source faltan / difieren / no se verifican en dest.
-/// `*_entry_id` opcional: si falta, se usa la raíz del disco (comparación de disco
-/// entero); si está, se compara desde esa carpeta (alineá los roots para que matcheen
-/// las rutas relativas). OFFLINE: no requiere los discos montados. Args en una sola
-/// struct para evitar el edge de Tauri con multi-arg + State.
-#[derive(serde::Deserialize)]
-pub struct CompareArgs {
-    pub source_disk_id: i64,
-    pub source_entry_id: Option<i64>,
-    pub dest_disk_id: i64,
-    pub dest_entry_id: Option<i64>,
-}
-
 /// A2-meta: metadata enriquecida de una entrada (hash + GPS/cámara/captura) para el inspector.
 #[tauri::command(async)]
 pub fn get_entry_meta(
@@ -473,48 +459,27 @@ pub fn get_entry_meta(
     db::get_entry_meta(&cat.conn, entry_id).map_err(|e| e.to_string())
 }
 
-/// Resuelve la entrada raíz a comparar: la dada explícitamente, o la raíz del disco.
-fn resolve_root(conn: &Connection, disk_id: i64, entry: Option<i64>) -> Result<i64, String> {
-    match entry {
-        Some(e) => Ok(e),
-        None => db::disk_root_entry(conn, disk_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("el disco {disk_id} no tiene entradas catalogadas")),
-    }
-}
-
+/// D — Plan de copia multi-disco: agrupa los archivos elegidos por disco (online
+/// primero) para guiar la copia disco por disco. OFFLINE: arma el plan sobre el
+/// catálogo, no requiere montar nada.
 #[tauri::command(async)]
-pub fn compare_backup(
+pub fn gather_plan(
     state: tauri::State<'_, AppState>,
-    args: CompareArgs,
-) -> Result<db::BackupReport, String> {
+    entry_ids: Vec<i64>,
+) -> Result<db::GatherPlan, String> {
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
-    let src = resolve_root(&cat.conn, args.source_disk_id, args.source_entry_id)?;
-    let dst = resolve_root(&cat.conn, args.dest_disk_id, args.dest_entry_id)?;
-    db::compare_subtrees(&cat.conn, src, dst).map_err(|e| e.to_string())
+    db::gather_plan(&cat.conn, &entry_ids).map_err(|e| e.to_string())
 }
 
-/// B2 — Copiar lo que falta: copia al destino los archivos del origen ausentes
-/// (según `compare_subtrees`). Primera operación que ESCRIBE en un disco externo,
-/// con máximo cuidado: requiere ambos discos montados, NO sobreescribe nada, copia
-/// de forma atómica (temporal + rename) y VERIFICA cada archivo por hash tras copiar.
-/// `dry_run` devuelve solo el plan (cantidad + bytes + muestra) sin escribir nada.
-#[derive(serde::Deserialize)]
-pub struct CopyMissingArgs {
-    pub source_disk_id: i64,
-    pub source_entry_id: Option<i64>,
-    pub dest_disk_id: i64,
-    pub dest_entry_id: Option<i64>,
-    pub dry_run: bool,
-}
-
+/// Un archivo que no se pudo copiar, con el motivo.
 #[derive(Clone, serde::Serialize)]
 pub struct CopyFailure {
     pub rel_path: String,
     pub error: String,
 }
 
+/// Resultado de un gather. `dry_run` devuelve solo el plan, sin escribir nada.
 #[derive(Clone, serde::Serialize)]
 pub struct CopyResult {
     pub dry_run: bool,
@@ -529,115 +494,13 @@ pub struct CopyResult {
     pub sample: Vec<String>,
 }
 
+/// Progreso del gather, emitido por el evento `copy-progress`.
 #[derive(Clone, serde::Serialize)]
 struct CopyProgress {
     count: u64,
     total: u64,
     copied: u64,
     bytes: i64,
-}
-
-#[tauri::command(async)]
-pub fn copy_missing(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    args: CopyMissingArgs,
-) -> Result<CopyResult, String> {
-    // 1) Resolver rutas reales (requiere discos montados) + lista de faltantes,
-    //    dentro de un lock corto del catálogo; luego se libera para copiar sin
-    //    bloquear la UI.
-    let (src_root_real, dst_root_real, missing) = {
-        let guard = state.catalog.lock().unwrap();
-        let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
-        let src_root = resolve_root(&cat.conn, args.source_disk_id, args.source_entry_id)?;
-        let dst_root = resolve_root(&cat.conn, args.dest_disk_id, args.dest_entry_id)?;
-        let src_real = resolve_real_path(&cat.conn, src_root)?;
-        let dst_real = resolve_real_path(&cat.conn, dst_root)?;
-        let report = db::compare_subtrees(&cat.conn, src_root, dst_root).map_err(|e| e.to_string())?;
-        (src_real, dst_real, report.missing)
-    };
-
-    let planned = missing.len() as u64;
-    let planned_bytes: i64 = missing.iter().map(|f| f.size.max(0)).sum();
-    let sample: Vec<String> = missing.iter().take(50).map(|f| f.rel_path.clone()).collect();
-
-    if args.dry_run {
-        return Ok(CopyResult {
-            dry_run: true,
-            planned,
-            planned_bytes,
-            copied: 0,
-            copied_bytes: 0,
-            verified: 0,
-            skipped: 0,
-            cancelled: false,
-            failed: Vec::new(),
-            sample,
-        });
-    }
-
-    // 2) Copia real (sin el lock del catálogo).
-    let cancel_key = args.dest_disk_id.to_string();
-    clear_copy_cancel(&cancel_key);
-    let mut copied = 0u64;
-    let mut copied_bytes = 0i64;
-    let mut verified = 0u64;
-    let mut skipped = 0u64;
-    let mut failed: Vec<CopyFailure> = Vec::new();
-    let mut cancelled = false;
-
-    for (i, f) in missing.iter().enumerate() {
-        if copy_cancel_requested(&cancel_key) {
-            cancelled = true;
-            break;
-        }
-        let src = src_root_real.join(&f.rel_path);
-        let dst = dst_root_real.join(&f.rel_path);
-        // Nunca sobreescribir: si el destino ya existe, lo salteamos.
-        if dst.exists() {
-            skipped += 1;
-            continue;
-        }
-        match scan::copy_file_verified(&src, &dst) {
-            Ok(bytes) => {
-                copied += 1;
-                verified += 1;
-                copied_bytes += bytes as i64;
-            }
-            Err(e) => failed.push(CopyFailure { rel_path: f.rel_path.clone(), error: e.to_string() }),
-        }
-        let _ = app.emit(
-            "copy-progress",
-            CopyProgress { count: (i + 1) as u64, total: planned, copied, bytes: copied_bytes },
-        );
-    }
-    clear_copy_cancel(&cancel_key);
-
-    Ok(CopyResult {
-        dry_run: false,
-        planned,
-        planned_bytes,
-        copied,
-        copied_bytes,
-        verified,
-        skipped,
-        cancelled,
-        failed,
-        sample,
-    })
-}
-
-/// D — Plan de copia multi-disco: agrupa los archivos elegidos por disco (online
-/// primero) para guiar la copia disco por disco. OFFLINE: arma el plan sobre el
-/// catálogo, no requiere montar nada.
-#[tauri::command(async)]
-pub fn gather_plan(
-    state: tauri::State<'_, AppState>,
-    entry_ids: Vec<i64>,
-) -> Result<db::GatherPlan, String> {
-    let guard = state.catalog.lock().unwrap();
-    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
-    db::gather_plan(&cat.conn, &entry_ids).map_err(|e| e.to_string())
 }
 
 /// D — Copia los archivos de UN disco (el que está montado) a `dest_dir`, preservando
@@ -805,9 +668,24 @@ pub fn find_duplicates(
         .map_err(|e| e.to_string())
 }
 
-// ---------- Comparación de discos / mirror de backup (M9) ----------
+// ---------- Comparación de discos y copia de respaldo ----------
+//
+// Una sola feature con dos criterios de comparación (`deep`):
+//   - rápido   (tamaño): instantáneo, siempre disponible.
+//   - profundo (BLAKE3): detecta contenido distinto con el mismo tamaño, pero
+//     necesita que el escaneo enriquecido haya hasheado ambos lados.
+// Comparar es siempre OFFLINE (solo catálogo); copiar exige ambos discos montados.
 
-/// M9: compara dos discos del catálogo por ruta relativa + tamaño. Solo lee del
+/// Traduce el flag de la UI al criterio de comparación del catálogo.
+fn compare_mode(deep: bool) -> db::CompareMode {
+    if deep {
+        db::CompareMode::Deep
+    } else {
+        db::CompareMode::Fast
+    }
+}
+
+/// Compara dos subárboles (discos enteros o carpetas) del catálogo. Solo lee del
 /// catálogo, así que funciona aunque los discos estén desconectados.
 #[tauri::command(async)]
 pub fn compare_disks(
@@ -816,6 +694,7 @@ pub fn compare_disks(
     dst_disk_id: i64,
     src_root_id: Option<i64>,
     dst_root_id: Option<i64>,
+    deep: bool,
     limit: Option<i64>,
 ) -> Result<db::DiskDiff, String> {
     // Mismo disco solo se permite si se comparan carpetas distintas.
@@ -830,12 +709,13 @@ pub fn compare_disks(
         dst_disk_id,
         src_root_id,
         dst_root_id,
+        compare_mode(deep),
         limit.unwrap_or(5000).max(0) as usize,
     )
     .map_err(|e| e.to_string())
 }
 
-/// Progreso del mirror, emitido por el evento `compare-copy-progress`.
+/// Progreso de la copia, emitido por el evento `compare-copy-progress`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MirrorCopyProgress {
     pub done: i64,
@@ -845,25 +725,21 @@ pub struct MirrorCopyProgress {
     pub current: String,
 }
 
-/// Resumen final del mirror.
+/// Resumen final de la copia.
 #[derive(Debug, Clone, Serialize)]
 pub struct CopySummary {
     pub copied: i64,
     pub failed: i64,
     pub bytes_copied: i64,
+    /// Copiados y re-leídos con hash idéntico al origen. Debería igualar a
+    /// `copied` menos las carpetas: si no, algo escribió mal y se reportó.
+    pub verified: i64,
+    /// El destino ya existía y no correspondía reemplazarlo.
+    pub skipped: i64,
     pub errors: Vec<String>,
     pub cancelled: bool,
     /// El catálogo del destino quedó desactualizado: conviene re-escanear.
     pub needs_rescan: bool,
-}
-
-/// Flag global de cancelación del mirror en curso (solo uno a la vez).
-static COPY_CANCEL: AtomicBool = AtomicBool::new(false);
-
-/// M9: pide cancelar el mirror en curso. Aborta antes del próximo archivo.
-#[tauri::command(async)]
-pub fn mirror_cancel_copy() {
-    COPY_CANCEL.store(true, Ordering::SeqCst);
 }
 
 /// Lee mount_path + online + nombre de un disco.
@@ -883,17 +759,19 @@ fn disk_mount(conn: &Connection, disk_id: i64) -> Result<(String, String), Strin
     }
 }
 
-/// M9: copia al destino los archivos que faltan (y opcionalmente los de tamaño
-/// distinto), reproduciendo la estructura de carpetas. Requiere ambos discos
-/// online. Emite `compare-copy-progress` y devuelve un resumen.
+/// Copia al destino lo que falta (y, con `include_mismatch`, lo que difiere),
+/// reproduciendo la estructura de carpetas. Requiere ambos discos online.
+/// Cada archivo se copia de forma atómica y se verifica por hash tras escribirlo.
+/// Cancelable con `cancel_copy(dst_disk_id)`. Emite `compare-copy-progress`.
 #[tauri::command(async)]
-pub async fn mirror_copy_missing(
+pub async fn copy_missing(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     src_disk_id: i64,
     dst_disk_id: i64,
     src_root_id: Option<i64>,
     dst_root_id: Option<i64>,
+    deep: bool,
     include_mismatch: bool,
 ) -> Result<CopySummary, String> {
     if src_disk_id == dst_disk_id && src_root_id == dst_root_id {
@@ -922,8 +800,16 @@ pub async fn mirror_copy_missing(
         };
         let src_mount = join_root(&src_disk_mount, src_root_id)?;
         let dst_mount = join_root(&dst_disk_mount, dst_root_id)?;
-        let plan = db::copy_plan(&cat.conn, src_disk_id, dst_disk_id, src_root_id, dst_root_id, include_mismatch)
-            .map_err(|e| e.to_string())?;
+        let plan = db::copy_plan(
+            &cat.conn,
+            src_disk_id,
+            dst_disk_id,
+            src_root_id,
+            dst_root_id,
+            compare_mode(deep),
+            include_mismatch,
+        )
+        .map_err(|e| e.to_string())?;
         (src_mount, dst_mount, plan)
     };
 
@@ -934,15 +820,21 @@ pub async fn mirror_copy_missing(
             copied: 0,
             failed: 0,
             bytes_copied: 0,
+            verified: 0,
+            skipped: 0,
             errors: Vec::new(),
             cancelled: false,
             needs_rescan: false,
         });
     }
 
-    COPY_CANCEL.store(false, Ordering::SeqCst);
+    // Cancelación por disco destino, igual que `gather_copy`: permite copiar a
+    // dos discos distintos a la vez sin que cancelar uno aborte el otro.
+    let cancel_key = dst_disk_id.to_string();
+    clear_copy_cancel(&cancel_key);
     let src_root = src_mount;
     let dst_root = dst_mount;
+    let cancel_probe = cancel_key.clone();
 
     let summary = tauri::async_runtime::spawn_blocking(move || {
         run_copy(
@@ -951,7 +843,7 @@ pub async fn mirror_copy_missing(
             &dst_root,
             total,
             bytes_total,
-            || COPY_CANCEL.load(Ordering::SeqCst),
+            || copy_cancel_requested(&cancel_probe),
             |done, bytes_done, current| {
                 let _ = app.emit(
                     "compare-copy-progress",
@@ -963,7 +855,7 @@ pub async fn mirror_copy_missing(
     .await
     .map_err(|e| e.to_string())?;
 
-    COPY_CANCEL.store(false, Ordering::SeqCst);
+    clear_copy_cancel(&cancel_key);
     Ok(summary)
 }
 
@@ -983,6 +875,8 @@ fn run_copy(
     let mut copied = 0i64;
     let mut failed = 0i64;
     let mut bytes_copied = 0i64;
+    let mut verified = 0i64;
+    let mut skipped = 0i64;
     let mut errors: Vec<String> = Vec::new();
     let mut cancelled = false;
 
@@ -1014,18 +908,21 @@ fn run_copy(
             continue;
         }
 
-        if let Some(parent) = dst_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                failed += 1;
-                if errors.len() < 50 {
-                    errors.push(format!("{}: {e}", item.rel_path));
-                }
-                continue;
-            }
+        // Nunca pisar algo que no vinimos a reemplazar. El plan se calculó contra
+        // el catálogo, que puede estar desactualizado respecto del disco real:
+        // ante la duda, saltear y reportar, jamás sobreescribir.
+        if !item.overwrite && dst_path.exists() {
+            skipped += 1;
+            continue;
         }
-        match std::fs::copy(&src_path, &dst_path) {
+
+        // Copia atómica (temporal + fsync + rename) con verificación por hash:
+        // relee lo escrito y confirma que hashea igual que el origen. Si no,
+        // borra el destino y devuelve error en vez de dejar basura silenciosa.
+        match scan::copy_file_verified(&src_path, &dst_path) {
             Ok(n) => {
                 copied += 1;
+                verified += 1;
                 bytes_copied += n as i64;
             }
             Err(e) => {
@@ -1043,6 +940,8 @@ fn run_copy(
         copied,
         failed,
         bytes_copied,
+        verified,
+        skipped,
         errors,
         cancelled,
         needs_rescan: copied > 0,
@@ -1066,8 +965,8 @@ mod copy_tests {
         std::fs::create_dir_all(&dst).unwrap();
 
         let plan = vec![
-            db::CopyItem { rel_path: "CLIP/A.MP4".into(), size: 11, is_folder: false },
-            db::CopyItem { rel_path: "README.txt".into(), size: 3, is_folder: false },
+            db::CopyItem { rel_path: "CLIP/A.MP4".into(), size: 11, is_folder: false , overwrite: false },
+            db::CopyItem { rel_path: "README.txt".into(), size: 3, is_folder: false , overwrite: false },
         ];
         let summary = run_copy(&plan, &src, &dst, 2, 14, || false, |_, _, _| {});
 
@@ -1092,7 +991,7 @@ mod copy_tests {
         std::fs::create_dir_all(src.join("VACIA")).unwrap();
         std::fs::create_dir_all(&dst).unwrap();
 
-        let plan = vec![db::CopyItem { rel_path: "VACIA".into(), size: 0, is_folder: true }];
+        let plan = vec![db::CopyItem { rel_path: "VACIA".into(), size: 0, is_folder: true , overwrite: false }];
         let summary = run_copy(&plan, &src, &dst, 1, 0, || false, |_, _, _| {});
 
         assert_eq!(summary.copied, 1);
@@ -1112,12 +1011,46 @@ mod copy_tests {
         std::fs::write(src.join("A.bin"), b"x").unwrap();
         std::fs::create_dir_all(&dst).unwrap();
 
-        let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 1, is_folder: false }];
+        let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 1, is_folder: false , overwrite: false }];
         // Cancelado desde el arranque: no copia nada.
         let summary = run_copy(&plan, &src, &dst, 1, 1, || true, |_, _, _| {});
         assert!(summary.cancelled);
         assert_eq!(summary.copied, 0);
         assert!(!dst.join("A.bin").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// La garantía central de la copia: un destino ya ocupado no se pisa salvo
+    /// que el plan lo haya marcado. Protege contra un catálogo desactualizado
+    /// que diga "falta" sobre un archivo que en el disco real sí está.
+    #[test]
+    fn run_copy_never_overwrites_unless_planned() {
+        let base = std::env::temp_dir().join(format!("diskdex_overwrite_{}", std::process::id()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("A.bin"), b"nuevo").unwrap();
+        std::fs::write(dst.join("A.bin"), b"existente").unwrap();
+
+        // overwrite: false → se saltea y el destino queda intacto.
+        let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 5, is_folder: false, overwrite: false }];
+        let summary = run_copy(&plan, &src, &dst, 1, 5, || false, |_, _, _| {});
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.copied, 0);
+        assert_eq!(std::fs::read(dst.join("A.bin")).unwrap(), b"existente");
+
+        // overwrite: true → reemplaza y verifica por hash.
+        let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 5, is_folder: false, overwrite: true }];
+        let summary = run_copy(&plan, &src, &dst, 1, 5, || false, |_, _, _| {});
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.copied, 1);
+        assert_eq!(summary.verified, 1, "toda copia se relee y se verifica");
+        assert_eq!(std::fs::read(dst.join("A.bin")).unwrap(), b"nuevo");
+        // El temporal de la copia atómica no queda tirado.
+        assert!(!dst.join("A.bin.ddtmp").exists());
+
         let _ = std::fs::remove_dir_all(&base);
     }
 }

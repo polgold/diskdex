@@ -2440,6 +2440,72 @@ pub fn compare_disks(
     Ok(diff)
 }
 
+/// Una carpeta que contiene archivos faltantes, con el total acumulado de todo
+/// su subárbol. Es lo que la UI necesita para ofrecer "copiá esta carpeta sí,
+/// esta no" sin tener que traerse cientos de miles de rutas.
+#[derive(Debug, Clone, Serialize)]
+pub struct MissingNode {
+    /// Ruta relativa de la carpeta ("" = la raíz comparada).
+    pub rel_path: String,
+    /// Archivos faltantes en todo el subárbol (no solo los hijos directos).
+    pub files: i64,
+    pub bytes: i64,
+}
+
+/// Agrega los archivos faltantes por carpeta, sumando a cada ancestro.
+///
+/// A diferencia de `compare_disks`, acá NO hay recorte: los contadores son
+/// exactos aunque falten 500.000 archivos, porque lo que se devuelve son
+/// carpetas (muchas menos) y no rutas de archivo.
+pub fn missing_tree(
+    conn: &Connection,
+    src_id: i64,
+    dst_id: i64,
+    src_root: Option<i64>,
+    dst_root: Option<i64>,
+    mode: CompareMode,
+) -> DbResult<Vec<MissingNode>> {
+    use std::collections::HashMap;
+    let src = disk_rel_index(conn, src_id, src_root)?;
+    let dst = disk_rel_index(conn, dst_id, dst_root)?;
+
+    let mut agg: HashMap<String, (i64, i64)> = HashMap::new();
+    for (rel, node) in &src {
+        if node.is_folder {
+            continue; // las carpetas no aportan bytes; nacen de sus archivos
+        }
+        let falta = match dst.get(rel) {
+            None => true,
+            Some(dn) => matches!(classify(node, dn, mode), Verdict::Mismatch),
+        };
+        if !falta {
+            continue;
+        }
+        // Sumar a cada ancestro, incluida la raíz ("").
+        let mut acc = String::new();
+        let e = agg.entry(String::new()).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += node.size;
+        let comps: Vec<&str> = rel.split('/').collect();
+        for c in &comps[..comps.len().saturating_sub(1)] {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(c);
+            let e = agg.entry(acc.clone()).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += node.size;
+        }
+    }
+
+    let mut out: Vec<MissingNode> = agg
+        .into_iter()
+        .map(|(rel_path, (files, bytes))| MissingNode { rel_path, files, bytes })
+        .collect();
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(out)
+}
+
 /// Ruta de una entrada relativa a la raíz del disco (sin el nombre del volumen),
 /// con separadores '/'. Sirve como prefijo para reconstruir la ruta real bajo el
 /// `mount_path` al copiar un subárbol acotado a una carpeta. `""` si es la raíz.
@@ -2462,6 +2528,18 @@ pub struct CopyItem {
     pub overwrite: bool,
 }
 
+/// ¿La ruta cae dentro de alguna de las carpetas elegidas? Con la lista vacía
+/// se copia todo (comportamiento por defecto). El match es por componente de
+/// ruta, no por texto: "NOA" no debe capturar a "NOA2".
+fn within_prefixes(rel: &str, prefixes: &[String]) -> bool {
+    if prefixes.is_empty() {
+        return true;
+    }
+    prefixes.iter().any(|p| {
+        p.is_empty() || rel == p.as_str() || rel.starts_with(&format!("{p}/"))
+    })
+}
+
 /// Plan de copia SIN recorte: todo lo que falta en el destino y, si
 /// `include_mismatch`, también los archivos de tamaño distinto.
 ///
@@ -2481,11 +2559,17 @@ pub fn copy_plan(
     dst_root: Option<i64>,
     mode: CompareMode,
     include_mismatch: bool,
+    // Carpetas elegidas por el usuario. Vacío = copiar todo. Una entrada se
+    // incluye si está dentro de alguno de estos prefijos.
+    prefixes: &[String],
 ) -> DbResult<Vec<CopyItem>> {
     let src = disk_rel_index(conn, src_id, src_root)?;
     let dst = disk_rel_index(conn, dst_id, dst_root)?;
     let mut out: Vec<CopyItem> = Vec::new();
     for (rel, node) in &src {
+        if !within_prefixes(rel, prefixes) {
+            continue;
+        }
         match dst.get(rel) {
             None => out.push(CopyItem {
                 rel_path: rel.clone(),
@@ -2579,10 +2663,10 @@ mod tests {
         assert_eq!(diff.extra_count, 0);
 
         // El plan de copia con mismatch incluye ambos archivos.
-        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, true).unwrap();
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, true, &[]).unwrap();
         assert_eq!(plan.len(), 2);
         // Sin mismatch, solo el faltante.
-        let plan_no_mm = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false).unwrap();
+        let plan_no_mm = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false, &[]).unwrap();
         assert_eq!(plan_no_mm.len(), 1);
         assert_eq!(plan_no_mm[0].rel_path, "CLIP/B-ROLL.MOV");
     }
@@ -2612,7 +2696,7 @@ mod tests {
         assert_eq!(diff.missing_count, 3);
         assert_eq!(diff.missing_file_count, 2);
 
-        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false).unwrap();
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false, &[]).unwrap();
         assert_eq!(plan.len() as i64, diff.missing_count);
         // La carpeta va primero: se crea antes que su contenido.
         assert_eq!(plan[0].rel_path, "CLIP");
@@ -2640,7 +2724,7 @@ mod tests {
         assert_eq!(diff.missing_count, 1);
         assert_eq!(diff.missing_file_count, 0); // no hay archivos, solo la carpeta
 
-        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false).unwrap();
+        let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, false, &[]).unwrap();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].rel_path, "VACIA");
         assert!(plan[0].is_folder);
@@ -2677,7 +2761,7 @@ mod tests {
 
         // El plan no toca CLIP ni con include_mismatch: pisarlo destruiría datos.
         for include_mismatch in [false, true] {
-            let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, include_mismatch).unwrap();
+            let plan = copy_plan(&conn, src_id, dst_id, None, None, CompareMode::Fast, include_mismatch, &[]).unwrap();
             assert!(plan.iter().all(|c| c.rel_path != "CLIP"));
         }
     }
@@ -3297,6 +3381,60 @@ mod tests {
         assert_eq!(search(&conn, "C0001", 10).unwrap().total, 1);
     }
 
+    /// El filtro por carpeta tiene que cortar por componente de ruta: si elegís
+    /// "NOA" no se puede colar "NOA2", que es un error clásico de comparar por
+    /// prefijo de texto y acá significaría copiar gigas que nadie pidió.
+    #[test]
+    fn prefix_filter_matches_whole_path_components() {
+        assert!(within_prefixes("NOA/CLIP/a.mp4", &["NOA".to_string()]));
+        assert!(within_prefixes("NOA", &["NOA".to_string()]));
+        assert!(!within_prefixes("NOA2/CLIP/a.mp4", &["NOA".to_string()]));
+        assert!(!within_prefixes("OTRA/a.mp4", &["NOA".to_string()]));
+        // Sin selección se copia todo.
+        assert!(within_prefixes("lo/que/sea.mp4", &[]));
+        // Varias carpetas elegidas.
+        let sel = vec!["NOA".to_string(), "VAQUEROS/POL".to_string()];
+        assert!(within_prefixes("VAQUEROS/POL/x.mp4", &sel));
+        assert!(!within_prefixes("VAQUEROS/OTRO/x.mp4", &sel));
+    }
+
+    /// El árbol de faltantes suma cada archivo a TODOS sus ancestros, para que
+    /// elegir una carpeta de arriba muestre el total de lo que hay abajo.
+    #[test]
+    fn missing_tree_aggregates_into_every_ancestor() {
+        let mut conn = open_in_memory().unwrap();
+        let folder = |name: &str, parent: i32| DcmfEntry {
+            name: name.into(), parent, is_folder: true, is_volume: parent < 0,
+            size_logical: 0, size_physical: 0, created: 0, modified: 0,
+        };
+        let file = |name: &str, parent: i32, size: u64| DcmfEntry {
+            name: name.into(), parent, is_folder: false, is_volume: false,
+            size_logical: size, size_physical: size, created: 0, modified: 0,
+        };
+        // SRC: NOA/CLIP/{a,b}  ·  DST: vacío → falta todo.
+        let src = DcmfDisk {
+            name: "SRC".into(),
+            entries: vec![
+                folder("SRC", -1), folder("NOA", 0), folder("CLIP", 1),
+                file("a.mp4", 2, 100), file("b.mp4", 2, 50),
+            ],
+        };
+        ingest_scanned(&mut conn, &src, Some("U-S"), "ssd", None, "/Volumes/S", None).unwrap();
+        let dst = DcmfDisk { name: "DST".into(), entries: vec![folder("DST", -1)] };
+        ingest_scanned(&mut conn, &dst, Some("U-D"), "ssd", None, "/Volumes/D", None).unwrap();
+
+        let s: i64 = conn.query_row("SELECT id FROM disks WHERE name='SRC'", [], |r| r.get(0)).unwrap();
+        let d: i64 = conn.query_row("SELECT id FROM disks WHERE name='DST'", [], |r| r.get(0)).unwrap();
+        let tree = missing_tree(&conn, s, d, None, None, CompareMode::Fast).unwrap();
+        let get = |p: &str| tree.iter().find(|n| n.rel_path == p).expect(p);
+
+        assert_eq!((get("").files, get("").bytes), (2, 150), "la raíz junta todo");
+        assert_eq!((get("NOA").files, get("NOA").bytes), (2, 150));
+        assert_eq!((get("NOA/CLIP").files, get("NOA/CLIP").bytes), (2, 150));
+        // Solo carpetas: los archivos no son nodos del árbol.
+        assert!(tree.iter().all(|n| !n.rel_path.ends_with(".mp4")));
+    }
+
     /// Dos discos distintos que comparten nombre pero tienen uuid propio no se
     /// mezclan: solo se adoptan filas cuyo uuid es NULL.
     #[test]
@@ -3485,13 +3623,13 @@ mod tests {
         // El plan de copia respeta el modo: con include_mismatch, el profundo
         // repone A.mov (marcado para reemplazo) y el rápido no lo toca.
         let deep_plan =
-            copy_plan(&conn, src_disk, dst_disk, None, None, CompareMode::Deep, true).unwrap();
+            copy_plan(&conn, src_disk, dst_disk, None, None, CompareMode::Deep, true, &[]).unwrap();
         let a_mov: Vec<_> = deep_plan.iter().filter(|c| c.rel_path == "DCIM/A.mov").collect();
         assert_eq!(a_mov.len(), 1);
         assert!(a_mov[0].overwrite, "reemplazar exige marcar overwrite explícitamente");
 
         let fast_plan =
-            copy_plan(&conn, src_disk, dst_disk, None, None, CompareMode::Fast, true).unwrap();
+            copy_plan(&conn, src_disk, dst_disk, None, None, CompareMode::Fast, true, &[]).unwrap();
         assert!(fast_plan.iter().all(|c| c.rel_path != "DCIM/A.mov"));
 
         // Lo "no verificado" nunca se copia: está presente y no hay evidencia de

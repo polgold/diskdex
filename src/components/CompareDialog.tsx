@@ -22,11 +22,13 @@ import {
   type DiskDiff,
   type DiffEntry,
   type EntryRow,
+  type MissingNode,
 } from "../lib/ipc";
 import { formatBytes, formatCount } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { Modal } from "./StatsDialog";
 import { useCopy } from "../store/copy";
+import { MissingTree } from "./MissingTree";
 import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 /** Un lado de la comparación: disco + carpeta raíz opcional (subárbol). */
@@ -242,6 +244,9 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
+  const [tree, setTree] = useState<MissingNode[]>([]);
+  // Conjunto mínimo de carpetas elegidas. "" = todo (el default tras comparar).
+  const [selected, setSelected] = useState<Set<string>>(new Set([""]));
 
   // Al abrir, re-chequear qué está montado ahora en vez de confiar en el
   // `is_online` guardado: el catálogo puede venir de otra sesión, y copiar
@@ -259,7 +264,23 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   // Todo lo faltante, carpetas incluidas: el mirror las crea para que el destino
   // quede idéntico. Los conflictos de tipo no entran (nunca se copian encima).
   const toCopyCount = diff ? diff.missing_count + (includeMismatch ? diff.mismatch_count : 0) : 0;
-  const toCopyBytes = diff ? diff.missing_bytes + (includeMismatch ? diff.mismatch_bytes : 0) : 0;
+
+  // Lo que realmente se va a copiar según las carpetas tildadas. Con "" (todo)
+  // vale el total; si no, se suman los nodos elegidos (que ya traen el total de
+  // su subárbol, y por ser el conjunto mínimo nunca se solapan entre sí).
+  const selectedTotals = (() => {
+    if (selected.has("")) {
+      const root = tree.find((n) => n.rel_path === "");
+      return { files: root?.files ?? diff?.missing_file_count ?? 0, bytes: root?.bytes ?? diff?.missing_bytes ?? 0 };
+    }
+    let files = 0, bytes = 0;
+    for (const p of selected) {
+      const n = tree.find((x) => x.rel_path === p);
+      if (n) { files += n.files; bytes += n.bytes; }
+    }
+    return { files, bytes };
+  })();
+  const selectedCount = selectedTotals.files;
 
   const scopeLabel = (s: Scope) =>
     s.crumbs.length <= 1 ? t("compare.wholeDisk") : s.crumbs.map((c) => c.name).join("/");
@@ -293,7 +314,15 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
     setResult(null);
     setError(null);
     try {
-      setDiff(await api.compareDisks(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep));
+      const d = await api.compareDisks(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep);
+      setDiff(d);
+      // Árbol de faltantes por carpeta: exacto, sin el recorte del diff.
+      setSelected(new Set([""]));
+      if (d.missing_count > 0) {
+        setTree(await api.missingTree(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep));
+      } else {
+        setTree([]);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -304,7 +333,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   async function runCopy() {
     if (!ready || !diff) return;
     const ok = await confirmDialog(
-      t("compare.confirm", { count: formatCount(toCopyCount), size: formatBytes(toCopyBytes) }),
+      t("compare.confirm", { count: formatCount(selectedCount), size: formatBytes(selectedTotals.bytes) }),
     );
     if (!ok) return;
     setResult(null);
@@ -318,8 +347,11 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       dstRootId: dst.rootId,
       deep,
       includeMismatch,
+      // "" (todo) se manda como lista vacía: es lo que el backend interpreta
+      // como "sin filtro", y evita depender de que "" matchee como prefijo.
+      prefixes: selected.has("") ? [] : Array.from(selected),
       label: `${scopeLabel(src)} → ${scopeLabel(dst)}`,
-      planned: toCopyCount,
+      planned: selectedCount,
     });
   }
 
@@ -410,11 +442,11 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
             ) : (
               <button
                 onClick={runCopy}
-                disabled={!bothOnline}
+                disabled={!bothOnline || selectedCount === 0}
                 className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
               >
-                <Copy className="h-3.5 w-3.5" /> {t("compare.copy")} ({formatCount(toCopyCount)} ·{" "}
-                {formatBytes(toCopyBytes)})
+                <Copy className="h-3.5 w-3.5" /> {t("compare.copy")} ({formatCount(selectedCount)} ·{" "}
+                {formatBytes(selectedTotals.bytes)})
               </button>
             )}
           </div>
@@ -446,6 +478,12 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {diff && tree.length > 0 && !copying && (
+        <div className="mb-4">
+          <MissingTree nodes={tree} selected={selected} onChange={setSelected} />
         </div>
       )}
 

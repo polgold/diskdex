@@ -364,7 +364,20 @@ export const api = {
     dstRootId: number | null,
     deep: boolean,
     includeMismatch: boolean,
-  ) => invoke<CopySummary>("copy_missing", { srcDiskId, dstDiskId, srcRootId, dstRootId, deep, includeMismatch }),
+    /** Carpetas elegidas. Vacío = copiar todo lo que falte. */
+    prefixes: string[] = [],
+  ) =>
+    invoke<CopySummary>("copy_missing", {
+      srcDiskId, dstDiskId, srcRootId, dstRootId, deep, includeMismatch, prefixes,
+    }),
+  /** Faltantes agregados por carpeta (exacto, sin recorte) para elegir qué copiar. */
+  missingTree: (
+    srcDiskId: number,
+    dstDiskId: number,
+    srcRootId: number | null,
+    dstRootId: number | null,
+    deep: boolean,
+  ) => invoke<MissingNode[]>("missing_tree", { srcDiskId, dstDiskId, srcRootId, dstRootId, deep }),
 
   // M5 — escaneo / detección de discos
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),
@@ -493,6 +506,13 @@ export interface DiskDiff {
   ok_count: number;
   truncated: boolean;
 }
+/** Carpeta con faltantes: totales de TODO su subárbol. */
+export interface MissingNode {
+  rel_path: string;
+  files: number;
+  bytes: number;
+}
+
 export interface CopySummary {
   copied: number;
   failed: number;

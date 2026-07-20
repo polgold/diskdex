@@ -121,6 +121,7 @@ pub fn run() {
             commands::gather_copy,
             commands::cancel_gather,
             commands::compare_disks,
+            commands::missing_tree,
             commands::copy_missing,
             commands::write_text_file,
             commands::save_session,

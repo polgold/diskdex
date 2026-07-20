@@ -743,6 +743,30 @@ pub fn compare_disks(
     .map_err(|e| e.to_string())
 }
 
+/// Faltantes agregados por carpeta, para elegir qué subárboles copiar. Exacto
+/// (sin el recorte de `compare_disks`) y offline: solo lee el catálogo.
+#[tauri::command(async)]
+pub fn missing_tree(
+    state: tauri::State<'_, AppState>,
+    src_disk_id: i64,
+    dst_disk_id: i64,
+    src_root_id: Option<i64>,
+    dst_root_id: Option<i64>,
+    deep: bool,
+) -> Result<Vec<db::MissingNode>, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    db::missing_tree(
+        &cat.conn,
+        src_disk_id,
+        dst_disk_id,
+        src_root_id,
+        dst_root_id,
+        compare_mode(deep),
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Progreso de la copia, emitido por el evento `compare-copy-progress`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MirrorCopyProgress {
@@ -801,6 +825,8 @@ pub async fn copy_missing(
     dst_root_id: Option<i64>,
     deep: bool,
     include_mismatch: bool,
+    // Carpetas elegidas. Vacío/ausente = copiar todo lo que falte.
+    prefixes: Option<Vec<String>>,
 ) -> Result<CopySummary, String> {
     if src_disk_id == dst_disk_id && src_root_id == dst_root_id {
         return Err("El origen y el destino no pueden ser la misma carpeta.".into());
@@ -836,6 +862,7 @@ pub async fn copy_missing(
             dst_root_id,
             compare_mode(deep),
             include_mismatch,
+            prefixes.as_deref().unwrap_or(&[]),
         )
         .map_err(|e| e.to_string())?;
         (src_mount, dst_mount, plan)

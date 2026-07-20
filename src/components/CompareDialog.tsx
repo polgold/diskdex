@@ -29,6 +29,7 @@ import { useT } from "../lib/i18n";
 import { Modal } from "./StatsDialog";
 import { useCopy } from "../store/copy";
 import { MissingTree } from "./MissingTree";
+import { TransferAnimation } from "./TransferAnimation";
 import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 /** Un lado de la comparación: disco + carpeta raíz opcional (subárbol). */
@@ -355,7 +356,6 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
     });
   }
 
-  const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
 
   // Cuántos quedan por copiar según lo que ya reportó el backend. El plan incluye
   // carpetas además de archivos, así que es una estimación — pero baja en vivo,
@@ -422,14 +422,15 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
           )}
 
           {copying && (
-            <div className="space-y-1">
-              <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
-                <div className="h-full bg-sky-500 transition-all" style={{ width: `${pct}%` }} />
-              </div>
-              <p className="truncate font-mono text-[11px] text-neutral-500">
-                {progress ? `${progress.done}/${progress.total} · ${progress.current}` : t("compare.copying")}
-              </p>
-            </div>
+            <TransferAnimation
+              from={srcDisk?.name ?? "—"}
+              to={dstDisk?.name ?? "—"}
+              done={progress?.done ?? 0}
+              total={progress?.total ?? selectedCount}
+              bytesDone={progress?.bytes_done ?? 0}
+              bytesTotal={progress?.bytes_total ?? 0}
+              current={progress?.current ?? ""}
+            />
           )}
 
           <div className="flex flex-wrap items-center gap-2">

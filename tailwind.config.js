@@ -86,12 +86,22 @@ export default {
           from: { opacity: "0", transform: "translateY(8px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        // Punto que viaja del disco origen al destino mientras se copia. Se
+        // anima `left` (y no transform) para que el recorrido sea el ancho real
+        // del contenedor, sea cual sea el tamaño de la ventana.
+        flow: {
+          "0%": { left: "0%", opacity: "0" },
+          "12%": { opacity: "1" },
+          "88%": { opacity: "1" },
+          "100%": { left: "100%", opacity: "0" },
+        },
       },
       animation: {
         "fade-in": "fade-in 150ms ease-out",
         "zoom-in": "zoom-in 160ms cubic-bezier(0.16,1,0.3,1)",
         "splash-logo": "splash-logo 650ms cubic-bezier(0.16,1,0.3,1) both",
         "splash-up": "splash-up 600ms cubic-bezier(0.16,1,0.3,1) both",
+        flow: "flow 1.8s linear infinite",
       },
     },
   },

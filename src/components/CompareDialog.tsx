@@ -11,6 +11,7 @@ import {
   ChevronRight,
   HardDrive,
   HelpCircle,
+  RefreshCw,
   ShieldCheck,
   Zap,
   CheckCircle2,
@@ -235,9 +236,13 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   const [progress, setProgress] = useState<CopyProgress | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rechecking, setRechecking] = useState(false);
 
+  // Al abrir, re-chequear qué está montado ahora en vez de confiar en el
+  // `is_online` guardado: el catálogo puede venir de otra sesión, y copiar
+  // depende de que el estado sea el real, no el de la última vez.
   useEffect(() => {
-    api.listDisks().then(setDisks).catch((e) => setError(String(e)));
+    api.refreshOnlineStatus().then(setDisks).catch((e) => setError(String(e)));
   }, []);
 
   useEffect(() => {
@@ -260,6 +265,19 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
 
   const scopeLabel = (s: Scope) =>
     s.crumbs.length <= 1 ? t("compare.wholeDisk") : s.crumbs.map((c) => c.name).join("/");
+
+  // Vuelve a mirar qué volúmenes están montados. No toca el diff: comparar es
+  // offline, así que lo ya comparado sigue siendo válido.
+  async function recheckOnline() {
+    setRechecking(true);
+    try {
+      setDisks(await api.refreshOnlineStatus());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRechecking(false);
+    }
+  }
 
   // Cambiar de criterio invalida lo mostrado: un diff por tamaño y uno por hash
   // no son comparables, y dejarlo en pantalla induciría a copiar con el criterio
@@ -352,6 +370,79 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
         {comparing ? t("compare.comparing") : t("compare.run")}
       </button>
 
+      {/* Zona de copia: va ARRIBA de las listas. Con miles de diferencias, dejarla
+          al final la escondía debajo de un scroll larguísimo y no se entendía por
+          qué no se podía copiar. La acción y su motivo de bloqueo van juntos. */}
+      {diff && toCopyCount > 0 && (
+        <div className="mb-4 space-y-2 rounded-lg border border-border bg-neutral-950/40 p-3">
+          {diff.mismatch_count > 0 && (
+            <label className="flex items-center gap-2 text-xs text-neutral-300">
+              <input type="checkbox" checked={includeMismatch} onChange={(e) => setIncludeMismatch(e.target.checked)} />
+              {t("compare.includeMismatch")}
+            </label>
+          )}
+
+          {copying && (
+            <div className="space-y-1">
+              <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
+                <div className="h-full bg-sky-500 transition-all" style={{ width: `${pct}%` }} />
+              </div>
+              <p className="truncate font-mono text-[11px] text-neutral-500">
+                {progress ? `${progress.done}/${progress.total} · ${progress.current}` : t("compare.copying")}
+              </p>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            {copying ? (
+              <button
+                onClick={() => dst.diskId != null && api.cancelCopy(dst.diskId)}
+                className="inline-flex items-center gap-1.5 rounded border border-red-900/60 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950/50"
+              >
+                <X className="h-3.5 w-3.5" /> {t("compare.cancel")}
+              </button>
+            ) : (
+              <button
+                onClick={runCopy}
+                disabled={!bothOnline}
+                className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+              >
+                <Copy className="h-3.5 w-3.5" /> {t("compare.copy")} ({formatCount(toCopyCount)} ·{" "}
+                {formatBytes(toCopyBytes)})
+              </button>
+            )}
+          </div>
+
+          {/* Nombrar QUÉ disco falta conectar: con dos selectores, "conectá ambos
+              discos" obliga a adivinar cuál de los dos es el que está offline. */}
+          {!bothOnline && !copying && (
+            <div className="flex items-start gap-1.5 text-xs text-amber-400">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <div className="space-y-1.5">
+                <p>
+                  {t("compare.needOnlineDisks", {
+                    disks: [srcDisk, dstDisk]
+                      .filter((d) => d && !d.is_online)
+                      .map((d) => d!.name)
+                      .join(", "),
+                  })}
+                </p>
+                {/* Re-chequear sin cerrar el diálogo: conectás el disco y seguís
+                    desde acá, sin perder la comparación ya hecha. */}
+                <button
+                  onClick={recheckOnline}
+                  disabled={rechecking}
+                  className="inline-flex items-center gap-1 rounded border border-amber-800/60 px-2 py-0.5 text-amber-200 hover:bg-amber-950/40 disabled:opacity-40"
+                >
+                  {rechecking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                  {t("compare.recheck")}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {diff && (
         <div className="space-y-4">
           {diff.missing_count === 0 && diff.mismatch_count === 0 && diff.conflict_count === 0 ? (
@@ -418,46 +509,6 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
                 </section>
               )}
 
-              {/* Zona de copia */}
-              <div className="space-y-2 border-t border-border pt-3">
-                {diff.mismatch_count > 0 && (
-                  <label className="flex items-center gap-2 text-xs text-neutral-300">
-                    <input type="checkbox" checked={includeMismatch} onChange={(e) => setIncludeMismatch(e.target.checked)} />
-                    {t("compare.includeMismatch")}
-                  </label>
-                )}
-                {!bothOnline && <p className="text-xs text-amber-400">{t("compare.needOnline")}</p>}
-
-                {copying && (
-                  <div className="space-y-1">
-                    <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
-                      <div className="h-full bg-sky-500 transition-all" style={{ width: `${pct}%` }} />
-                    </div>
-                    <p className="truncate font-mono text-[11px] text-neutral-500">
-                      {progress ? `${progress.done}/${progress.total} · ${progress.current}` : t("compare.copying")}
-                    </p>
-                  </div>
-                )}
-
-                <div className="flex items-center gap-2">
-                  {copying ? (
-                    <button
-                      onClick={() => dst.diskId != null && api.cancelCopy(dst.diskId)}
-                      className="inline-flex items-center gap-1.5 rounded border border-red-900/60 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950/50"
-                    >
-                      <X className="h-3.5 w-3.5" /> {t("compare.cancel")}
-                    </button>
-                  ) : (
-                    <button
-                      onClick={runCopy}
-                      disabled={!bothOnline || toCopyCount === 0}
-                      className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
-                    >
-                      <Copy className="h-3.5 w-3.5" /> {t("compare.copy")} ({formatCount(toCopyCount)})
-                    </button>
-                  )}
-                </div>
-              </div>
             </>
           )}
         </div>

@@ -377,6 +377,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.copying": "copiando…",
     "compare.cancel": "Cancelar",
     "compare.needOnline": "Para copiar, conectá ambos discos y actualizá el estado (online).",
+    "compare.needOnlineDisks":
+      "Para copiar hay que conectar y poner online: {disks}. Conectá el disco y actualizá su estado desde la barra lateral.",
+    "compare.recheck": "Volver a chequear",
     "compare.confirm": "Se van a copiar {count} archivos ({size}) al disco de destino. ¿Continuar?",
     "compare.done": "Listo: {copied} copiados, {failed} con error.",
     "compare.cancelled": "Copia cancelada.",
@@ -807,6 +810,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.copying": "copying…",
     "compare.cancel": "Cancel",
     "compare.needOnline": "To copy, connect both disks and refresh their status (online).",
+    "compare.needOnlineDisks":
+      "To copy, these disks must be connected and online: {disks}. Plug the disk in and refresh its status from the sidebar.",
+    "compare.recheck": "Check again",
     "compare.confirm": "{count} files ({size}) will be copied to the destination disk. Continue?",
     "compare.done": "Done: {copied} copied, {failed} failed.",
     "compare.cancelled": "Copy cancelled.",

@@ -60,7 +60,13 @@ function App() {
     api.ping().then((p) => p !== "pong" && setStatus(t("app.ipcUnexpected", { p })));
     api.startVolumeWatch();
     const unlisteners = [
-      onVolumeAdded((v) => setDetected(v)),
+      onVolumeAdded((v) => {
+        // Conectar un disco lo pone online, se quiera escanear o no: son cosas
+        // distintas. Antes solo se ofrecía el escaneo, así que decir "no" dejaba
+        // el disco marcado offline y bloqueaba copiar/comparar contra él.
+        if (catalogPathRef.current) useCatalog.getState().refreshOnlineFromDisk();
+        setDetected(v);
+      }),
       onVolumeRemoved(() => {
         if (catalogPathRef.current) useCatalog.getState().refreshOnlineFromDisk();
       }),

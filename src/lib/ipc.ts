@@ -383,6 +383,23 @@ export const api = {
   gatherCopy: (entryIds: number[], destDir: string) =>
     invoke<CopyResult>("gather_copy", { args: { entry_ids: entryIds, dest_dir: destDir } }),
   cancelGather: (destDir: string) => invoke<void>("cancel_gather", { destDir }),
+  // M9 — comparación de discos/carpetas / mirror de backup (feature hermana de B1/B2,
+  // implementada en paralelo en otra máquina; comandos renombrados mirror_* para convivir)
+  compareDisks: (
+    srcDiskId: number,
+    dstDiskId: number,
+    srcRootId: number | null,
+    dstRootId: number | null,
+    limit?: number,
+  ) => invoke<DiskDiff>("compare_disks", { srcDiskId, dstDiskId, srcRootId, dstRootId, limit }),
+  mirrorCopyMissing: (
+    srcDiskId: number,
+    dstDiskId: number,
+    srcRootId: number | null,
+    dstRootId: number | null,
+    includeMismatch: boolean,
+  ) => invoke<CopySummary>("mirror_copy_missing", { srcDiskId, dstDiskId, srcRootId, dstRootId, includeMismatch }),
+  mirrorCancelCopy: () => invoke<void>("mirror_cancel_copy"),
 
   // M5 — escaneo / detección de discos
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),
@@ -482,5 +499,45 @@ export interface IndexProgress {
 }
 export const onScanProgress = (cb: (p: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>("scan-progress", (e) => cb(e.payload));
+
+// M9 — comparación de discos / mirror de backup.
+export interface DiffEntry {
+  rel_path: string;
+  is_folder: boolean;
+  src_size: number;
+  dst_size: number;
+  src_entry_id: number;
+}
+export interface DiskDiff {
+  missing: DiffEntry[];
+  size_mismatch: DiffEntry[];
+  extra: DiffEntry[];
+  conflicts: DiffEntry[];
+  missing_count: number;
+  missing_file_count: number;
+  missing_bytes: number;
+  mismatch_count: number;
+  mismatch_bytes: number;
+  extra_count: number;
+  conflict_count: number;
+  truncated: boolean;
+}
+export interface CopySummary {
+  copied: number;
+  failed: number;
+  bytes_copied: number;
+  errors: string[];
+  cancelled: boolean;
+  needs_rescan: boolean;
+}
+export interface CopyProgress {
+  done: number;
+  total: number;
+  bytes_done: number;
+  bytes_total: number;
+  current: string;
+}
+export const onCopyProgress = (cb: (p: CopyProgress) => void): Promise<UnlistenFn> =>
+  listen<CopyProgress>("compare-copy-progress", (e) => cb(e.payload));
 export const onIndexProgress = (cb: (p: IndexProgress) => void): Promise<UnlistenFn> =>
   listen<IndexProgress>("index-progress", (e) => cb(e.payload));

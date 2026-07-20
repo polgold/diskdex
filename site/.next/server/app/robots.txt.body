@@ -1,0 +1,5 @@
+User-Agent: *
+Allow: /
+
+Host: https://diskdex.app
+Sitemap: https://diskdex.app/sitemap.xml

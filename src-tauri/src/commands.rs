@@ -995,6 +995,13 @@ fn run_copy(
         // ante la duda, saltear y reportar, jamás sobreescribir.
         if !item.overwrite && dst_path.exists() {
             skipped += 1;
+            // Saltear NO es "no pasó nada": el plan lo daba por faltante y en el
+            // disco está. Esa discrepancia es justamente lo que el catálogo tiene
+            // desactualizado, así que se registra igual —con el tamaño real del
+            // destino— y la próxima comparación deja de pedirlo. Sin esto, todo
+            // lo copiado por una versión anterior quedaría faltante para siempre.
+            let real = std::fs::metadata(&dst_path).map(|m| m.len() as i64).unwrap_or(item.size);
+            copied_items.push((item.rel_path.clone(), real, false));
             continue;
         }
 
@@ -1129,6 +1136,13 @@ mod copy_tests {
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.copied, 0);
         assert_eq!(std::fs::read(dst.join("A.bin")).unwrap(), b"existente");
+
+        // Lo salteado se reporta igual que lo copiado: el catálogo no sabía que
+        // ese archivo ya estaba en el destino, y esa es justo la desactualización
+        // que hay que corregir. Se registra con el tamaño REAL del destino.
+        assert_eq!(summary.copied_items.len(), 1);
+        assert_eq!(summary.copied_items[0].0, "A.bin");
+        assert_eq!(summary.copied_items[0].1, "existente".len() as i64);
 
         // overwrite: true → reemplaza y verifica por hash.
         let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 5, is_folder: false, overwrite: true }];

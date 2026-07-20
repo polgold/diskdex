@@ -208,8 +208,10 @@ export interface CopyResult {
   sample: string[];
 }
 
-/** B2 — progreso de copia (evento "copy-progress" / "gather-progress"). */
-export interface CopyProgress {
+/** Progreso del gather (eventos "copy-progress" / "gather-progress").
+ *  Ojo: distinto del CopyProgress de la comparación — se llamaban igual y
+ *  TypeScript fusionaba las dos interfaces, así que ninguna se chequeaba bien. */
+export interface GatherProgress {
   count: number;
   total: number;
   copied: number;

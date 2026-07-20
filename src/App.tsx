@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save, confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { HardDrive, Database, Import, FolderOpen, Loader2, ScanLine, Usb, X, Share2, Languages } from "lucide-react";
+import { HardDrive, Database, Import, FolderOpen, Loader2, ScanLine, Usb, X, Share2, Languages, Copy } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   api,
@@ -15,6 +15,7 @@ import {
 } from "./lib/ipc";
 import { formatBytes, formatCount } from "./lib/format";
 import { useCatalog } from "./store/catalog";
+import { useCopy } from "./store/copy";
 import { useT, useI18n } from "./lib/i18n";
 import { localizeError } from "./lib/errors";
 import { ScanDialog } from "./components/ScanDialog";
@@ -53,6 +54,10 @@ function App() {
   const [detected, setDetected] = useState<VolumeInfo | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [splash, setSplash] = useState(true);
+  // Copia de respaldo corriendo en segundo plano (arrancada desde Comparar).
+  const copyRunning = useCopy((s) => s.running);
+  const copyProgress = useCopy((s) => s.progress);
+  const cancelCopy = useCopy((s) => s.cancel);
   const catalogPathRef = useRef<string | null>(null);
   catalogPathRef.current = catalogPath;
 
@@ -383,8 +388,16 @@ function App() {
         </div>
       )}
 
-      {(Object.keys(scanning).length > 0 || indexProg) && (
+      {(Object.keys(scanning).length > 0 || indexProg || copyRunning) && (
         <div className="space-y-1.5 border-b border-border bg-neutral-900/40 px-4 py-1.5">
+          {copyRunning && (
+            <CopyProgressBar
+              label={copyRunning.label}
+              planned={copyRunning.planned}
+              progress={copyProgress}
+              onCancel={cancelCopy}
+            />
+          )}
           {Object.values(scanning).map((s) => (
             <ScanProgressBar
               key={s.mount}
@@ -456,6 +469,50 @@ const PHASE_KEYS: Record<IndexProgress["phase"], string> = {
   videos: "app.phaseVideos",
   archives: "app.phaseArchives",
 };
+
+/** Copia de respaldo en curso. Vive en la barra superior (no en el diálogo) para
+ *  que se pueda cerrar Comparar y seguir escaneando mientras copia. */
+function CopyProgressBar({
+  label,
+  planned,
+  progress,
+  onCancel,
+}: {
+  label: string;
+  planned: number;
+  progress: { done: number; total: number; bytes_done: number; bytes_total: number; current: string } | null;
+  onCancel: () => void;
+}) {
+  const t = useT();
+  const total = progress?.total ?? planned;
+  const done = progress?.done ?? 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 text-[11px] text-neutral-400">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Copy className="h-3 w-3 shrink-0 text-emerald-400" />
+          <span className="shrink-0 text-neutral-300">{t("copy.running")}</span>
+          <span className="truncate text-neutral-500">{label}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span>
+            {formatCount(done)}/{formatCount(total)} · {t("copy.remaining", { n: formatCount(Math.max(0, total - done)) })}
+          </span>
+          <button onClick={onCancel} className="rounded border border-neutral-700 px-1.5 hover:bg-neutral-800">
+            {t("common.cancel")}
+          </button>
+        </span>
+      </div>
+      <div className="mt-1 h-1 w-full overflow-hidden rounded bg-neutral-800">
+        <div className="h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
+      </div>
+      {progress?.current && (
+        <p className="truncate font-mono text-[10px] text-neutral-600">{progress.current}</p>
+      )}
+    </div>
+  );
+}
 
 function ProgressBar({ progress }: { progress: IndexProgress }) {
   const t = useT();

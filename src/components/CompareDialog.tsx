@@ -18,16 +18,15 @@ import {
 } from "lucide-react";
 import {
   api,
-  onCopyProgress,
   type DiskRow,
   type DiskDiff,
   type DiffEntry,
-  type CopyProgress,
   type EntryRow,
 } from "../lib/ipc";
 import { formatBytes, formatCount } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { Modal } from "./StatsDialog";
+import { useCopy } from "../store/copy";
 import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 /** Un lado de la comparación: disco + carpeta raíz opcional (subárbol). */
@@ -233,8 +232,13 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   const [deep, setDeep] = useState(false);
   const [comparing, setComparing] = useState(false);
   const [includeMismatch, setIncludeMismatch] = useState(false);
-  const [copying, setCopying] = useState(false);
-  const [progress, setProgress] = useState<CopyProgress | null>(null);
+  // La copia vive en un store global: así cerrar el diálogo no la corta y se
+  // puede seguir usando la app (escanear otro disco) mientras corre.
+  const copyRunning = useCopy((s) => s.running);
+  const progress = useCopy((s) => s.progress);
+  const startCopy = useCopy((s) => s.start);
+  const cancelCopy = useCopy((s) => s.cancel);
+  const copying = copyRunning !== null;
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -244,13 +248,6 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   // depende de que el estado sea el real, no el de la última vez.
   useEffect(() => {
     api.refreshOnlineStatus().then(setDisks).catch((e) => setError(String(e)));
-  }, []);
-
-  useEffect(() => {
-    const un = onCopyProgress(setProgress);
-    return () => {
-      un.then((fn) => fn());
-    };
   }, []);
 
   const srcDisk = disks.find((d) => d.id === src.diskId) ?? null;
@@ -310,29 +307,37 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       t("compare.confirm", { count: formatCount(toCopyCount), size: formatBytes(toCopyBytes) }),
     );
     if (!ok) return;
-    setCopying(true);
     setResult(null);
     setError(null);
-    setProgress(null);
-    try {
-      const s = await api.copyMissing(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep, includeMismatch);
-      setResult(
-        (s.cancelled ? t("compare.cancelled") + " " : "") +
-          t("compare.done", { copied: formatCount(s.copied), failed: formatCount(s.failed) }) +
-          " " + t("compare.verified", { n: formatCount(s.verified) }) +
-          (s.skipped > 0 ? " " + t("compare.skipped", { n: formatCount(s.skipped) }) : "") +
-          (s.needs_rescan ? " " + t("compare.rescanHint") : ""),
-      );
-      if (s.errors.length > 0) setError(s.errors.slice(0, 5).join("\n"));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setCopying(false);
-      setProgress(null);
-    }
+    // No se espera: la copia queda corriendo en el store y la barra de arriba la
+    // sigue mostrando aunque cierres este diálogo.
+    void startCopy({
+      srcDiskId: src.diskId!,
+      dstDiskId: dst.diskId!,
+      srcRootId: src.rootId,
+      dstRootId: dst.rootId,
+      deep,
+      includeMismatch,
+      label: `${scopeLabel(src)} → ${scopeLabel(dst)}`,
+      planned: toCopyCount,
+    });
   }
 
   const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+
+  // Cuántos quedan por copiar según lo que ya reportó el backend. El plan incluye
+  // carpetas además de archivos, así que es una estimación — pero baja en vivo,
+  // que es lo que importa mientras mirás la barra.
+  const remaining =
+    diff && progress ? Math.max(0, toCopyCount - progress.done) : diff ? toCopyCount : 0;
+
+  // Al terminar la copia, re-comparar solo si el diálogo sigue abierto: el diff
+  // en pantalla quedó viejo y dejarlo induce a copiar de nuevo lo ya copiado.
+  const lastSummary = useCopy((s) => s.lastSummary);
+  useEffect(() => {
+    if (lastSummary && diff && !copying) void runCompare();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastSummary]);
 
   return (
     <Modal onClose={onClose} title={t("compare.title")} icon={<GitCompareArrows className="h-4 w-4 text-sky-400" />}>
@@ -397,7 +402,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
           <div className="flex flex-wrap items-center gap-2">
             {copying ? (
               <button
-                onClick={() => dst.diskId != null && api.cancelCopy(dst.diskId)}
+                onClick={cancelCopy}
                 className="inline-flex items-center gap-1.5 rounded border border-red-900/60 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950/50"
               >
                 <X className="h-3.5 w-3.5" /> {t("compare.cancel")}
@@ -464,6 +469,11 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
                     <FileWarning className="h-3.5 w-3.5" /> {t("compare.missing")} ·{" "}
                     {t("compare.filesCount", { count: formatCount(diff.missing_file_count) })} ·{" "}
                     <span className="text-red-400">{formatBytes(diff.missing_bytes)}</span>
+                    {copying && (
+                      <span className="font-normal text-sky-300">
+                        · {t("compare.remaining", { n: formatCount(remaining) })}
+                      </span>
+                    )}
                   </h3>
                   <DiffList entries={diff.missing} count={diff.missing_count} kind="missing" />
                 </section>

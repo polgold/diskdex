@@ -2,20 +2,37 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "opener:default",
     {
       "identifier": "opener:allow-open-path",
-      "allow": [{ "path": "**" }, { "path": "/**" }]
+      "allow": [
+        {
+          "path": "**"
+        },
+        {
+          "path": "/**"
+        }
+      ]
     },
     {
       "identifier": "opener:allow-reveal-item-in-dir",
-      "allow": [{ "path": "**" }, { "path": "/**" }]
+      "allow": [
+        {
+          "path": "**"
+        },
+        {
+          "path": "/**"
+        }
+      ]
     },
     "dialog:default",
-  "dialog:allow-confirm",
-  "dialog:allow-ask"
+    "dialog:allow-confirm",
+    "dialog:allow-ask",
+    "notification:default"
   ]
 }

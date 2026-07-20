@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { FolderInput, Loader2, HardDrive, Check, FolderOpen, RefreshCw, AlertTriangle } from "lucide-react";
-import { api, type GatherPlan, type GatherGroup, type CopyResult, type CopyProgress } from "../lib/ipc";
+import { api, type GatherPlan, type GatherGroup, type CopyResult, type GatherProgress } from "../lib/ipc";
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatCount } from "../lib/format";
 import { useT } from "../lib/i18n";
@@ -18,7 +18,7 @@ export function GatherDialog({ entryIds, onClose }: { entryIds: number[]; onClos
   const [plan, setPlan] = useState<GatherPlan | null>(null);
   const [destDir, setDestDir] = useState<string>("");
   const [copying, setCopying] = useState<number | null>(null);
-  const [prog, setProg] = useState<CopyProgress | null>(null);
+  const [prog, setProg] = useState<GatherProgress | null>(null);
   const [results, setResults] = useState<Record<number, CopyResult>>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -61,7 +61,7 @@ export function GatherDialog({ entryIds, onClose }: { entryIds: number[]; onClos
     setProg(null);
     let unlisten: UnlistenFn | null = null;
     try {
-      unlisten = await listen<CopyProgress>("gather-progress", (e) => setProg(e.payload));
+      unlisten = await listen<GatherProgress>("gather-progress", (e) => setProg(e.payload));
       const r = await api.gatherCopy(g.files.map((f) => f.entry_id), dest);
       setResults((prev) => ({ ...prev, [g.disk_id]: r }));
     } catch (e) {

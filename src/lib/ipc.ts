@@ -189,43 +189,6 @@ export interface ScanOptions {
   enrich?: boolean;
 }
 
-/** B1 — referencia a un archivo del source en el reporte de backup. */
-export interface FileRef {
-  entry_id: number;
-  rel_path: string;
-  name: string;
-  size: number;
-}
-
-/** B1 — resultado de comparar un subárbol source contra uno destination. */
-export interface BackupReport {
-  ok: number;
-  missing: FileRef[];
-  mismatch: FileRef[];
-  unverified: FileRef[];
-  extra: number;
-  missing_bytes: number;
-  source_total: number;
-  fully_backed_up: boolean;
-}
-
-/** B1 — args para `compare_backup`. `*_entry_id` opcional = comparar disco entero. */
-export interface CompareArgs {
-  source_disk_id: number;
-  source_entry_id?: number | null;
-  dest_disk_id: number;
-  dest_entry_id?: number | null;
-}
-
-/** B2 — args para `copy_missing`. `dry_run` = solo plan, no escribe. */
-export interface CopyMissingArgs {
-  source_disk_id: number;
-  source_entry_id?: number | null;
-  dest_disk_id: number;
-  dest_entry_id?: number | null;
-  dry_run: boolean;
-}
-
 export interface CopyFailure {
   rel_path: string;
   error: string;
@@ -373,33 +336,31 @@ export const api = {
   findDuplicates: (minSize?: number, limit?: number) =>
     invoke<DupGroup[]>("find_duplicates", { minSize, limit }),
 
-  // B1 — auditoría de backup (comparar source vs dest, offline)
-  compareBackup: (args: CompareArgs) => invoke<BackupReport>("compare_backup", { args }),
-  // B2 — copiar lo faltante (requiere ambos discos montados)
-  copyMissing: (args: CopyMissingArgs) => invoke<CopyResult>("copy_missing", { args }),
   cancelCopy: (destDiskId: number) => invoke<void>("cancel_copy", { destDiskId }),
   // D — plan de copia multi-disco (reunir archivos repartidos en varios discos)
   gatherPlan: (entryIds: number[]) => invoke<GatherPlan>("gather_plan", { entryIds }),
   gatherCopy: (entryIds: number[], destDir: string) =>
     invoke<CopyResult>("gather_copy", { args: { entry_ids: entryIds, dest_dir: destDir } }),
   cancelGather: (destDir: string) => invoke<void>("cancel_gather", { destDir }),
-  // M9 — comparación de discos/carpetas / mirror de backup (feature hermana de B1/B2,
-  // implementada en paralelo en otra máquina; comandos renombrados mirror_* para convivir)
+  // Comparación de discos/carpetas y copia de respaldo. `deep` elige el criterio:
+  // false = por tamaño (instantáneo), true = por hash BLAKE3 (detecta corrupción).
+  // Comparar es offline; copiar exige ambos discos montados y se cancela con cancelCopy.
   compareDisks: (
     srcDiskId: number,
     dstDiskId: number,
     srcRootId: number | null,
     dstRootId: number | null,
+    deep: boolean,
     limit?: number,
-  ) => invoke<DiskDiff>("compare_disks", { srcDiskId, dstDiskId, srcRootId, dstRootId, limit }),
-  mirrorCopyMissing: (
+  ) => invoke<DiskDiff>("compare_disks", { srcDiskId, dstDiskId, srcRootId, dstRootId, deep, limit }),
+  copyMissing: (
     srcDiskId: number,
     dstDiskId: number,
     srcRootId: number | null,
     dstRootId: number | null,
+    deep: boolean,
     includeMismatch: boolean,
-  ) => invoke<CopySummary>("mirror_copy_missing", { srcDiskId, dstDiskId, srcRootId, dstRootId, includeMismatch }),
-  mirrorCancelCopy: () => invoke<void>("mirror_cancel_copy"),
+  ) => invoke<CopySummary>("copy_missing", { srcDiskId, dstDiskId, srcRootId, dstRootId, deep, includeMismatch }),
 
   // M5 — escaneo / detección de discos
   listVolumes: () => invoke<VolumeInfo[]>("list_volumes"),
@@ -510,7 +471,10 @@ export interface DiffEntry {
 }
 export interface DiskDiff {
   missing: DiffEntry[];
+  /** Distinto contenido: por tamaño en modo rápido, por hash en modo profundo. */
   size_mismatch: DiffEntry[];
+  /** Solo en modo profundo: presentes y del mismo tamaño, pero sin hash para verificar. */
+  unverified: DiffEntry[];
   extra: DiffEntry[];
   conflicts: DiffEntry[];
   missing_count: number;
@@ -520,12 +484,19 @@ export interface DiskDiff {
   mismatch_bytes: number;
   extra_count: number;
   conflict_count: number;
+  unverified_count: number;
+  /** Archivos verificados como idénticos en el destino. */
+  ok_count: number;
   truncated: boolean;
 }
 export interface CopySummary {
   copied: number;
   failed: number;
   bytes_copied: number;
+  /** Copiados y re-leídos con hash idéntico al origen. */
+  verified: number;
+  /** El destino ya existía y no correspondía reemplazarlo. */
+  skipped: number;
   errors: string[];
   cancelled: boolean;
   needs_rescan: boolean;

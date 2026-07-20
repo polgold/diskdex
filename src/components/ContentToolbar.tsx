@@ -12,7 +12,6 @@ import {
   Trash2,
   List,
   LayoutGrid,
-  ShieldCheck,
   FolderInput,
   GitCompareArrows,
 } from "lucide-react";
@@ -22,7 +21,6 @@ import { exportRows, type ExportRow, type ExportFormat } from "../lib/export";
 import { FILE_CATEGORIES } from "../lib/query-parser";
 import { StatsDialog } from "./StatsDialog";
 import { DuplicatesDialog } from "./DuplicatesDialog";
-import { BackupAuditDialog } from "./BackupAuditDialog";
 import { GatherDialog } from "./GatherDialog";
 import { CompareDialog } from "./CompareDialog";
 import { trashIds } from "./ContentTable";
@@ -91,7 +89,6 @@ export function ContentToolbar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [stats, setStats] = useState(false);
   const [dups, setDups] = useState(false);
-  const [backup, setBackup] = useState(false);
   const [gather, setGather] = useState(false);
   const [compare, setCompare] = useState(false);
 
@@ -175,12 +172,6 @@ export function ContentToolbar() {
         <Copy className="h-3.5 w-3.5" /> {t("toolbar.duplicates")}
       </button>
       <button
-        onClick={() => setBackup(true)}
-        className="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
-      >
-        <ShieldCheck className="h-3.5 w-3.5" /> {t("toolbar.backup")}
-      </button>
-      <button
         onClick={() => setCompare(true)}
         className="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
       >
@@ -239,7 +230,6 @@ export function ContentToolbar() {
 
       {stats && <StatsDialog onClose={() => setStats(false)} />}
       {dups && <DuplicatesDialog onClose={() => setDups(false)} />}
-      {backup && <BackupAuditDialog onClose={() => setBackup(false)} />}
       {gather && <GatherDialog entryIds={selectedIds} onClose={() => setGather(false)} />}
       {compare && <CompareDialog onClose={() => setCompare(false)} />}
     </div>

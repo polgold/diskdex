@@ -173,7 +173,6 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.countRows": "{count} filas en la vista",
     "toolbar.viewTable": "Vista tabla",
     "toolbar.viewGrid": "Vista galería",
-    "toolbar.backup": "Backup",
     "toolbar.gather": "Reunir ({count})",
     "toolbar.gatherTitle": "Reunir la selección en una carpeta (copia disco por disco)",
 
@@ -192,39 +191,6 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "gather.failedN": "{n} fallaron",
     "gather.connect": "Conectá {name}",
     "gather.help": "Conectá cada disco y copiá su grupo. Se preserva la estructura por disco; no se sobreescribe nada y cada archivo se verifica por hash.",
-
-    // ── Auditoría de backup (B1) ──
-    "backup.title": "Auditar backup",
-    "backup.source": "Origen",
-    "backup.dest": "Destino (backup)",
-    "backup.compare": "Comparar",
-    "backup.pickDisk": "Elegí un disco…",
-    "backup.help":
-      "Compara qué archivos del origen están en el destino. Funciona aunque los discos estén desconectados (compara el catálogo). Verifica por hash si escaneaste con «Calcular hashes».",
-    "backup.allBackedUp": "Todo respaldado: {n} archivos verificados por hash.",
-    "backup.allPresentUnverified": "Todo presente, pero {n} sin verificar por hash (escaneá con «Calcular hashes» para confirmar).",
-    "backup.missingSummary": "Faltan {n} archivos ({bytes}) en el destino.",
-    "backup.ok": "verificados",
-    "backup.missing": "faltan",
-    "backup.mismatch": "difieren",
-    "backup.unverified": "sin verificar",
-    "backup.extra": "extra en destino",
-    "backup.mismatchTitle": "Difieren (¡copia parcial o corrupta!)",
-    "backup.missingTitle": "Faltan en el destino",
-    "backup.unverifiedTitle": "Presentes, sin verificar por hash",
-    "backup.andMore": "…y {n} más",
-    "backup.copyMissing": "Copiar lo que falta ({n} · {bytes})",
-    "backup.copyHelp": "Copia al destino los archivos faltantes. Requiere ambos discos montados. No sobreescribe nada y verifica cada copia por hash.",
-    "backup.confirmCopy": "¿Copiar {n} archivos ({bytes}) al destino?\n\nRequiere que ambos discos estén montados. No se sobreescribe nada existente; cada archivo se verifica por hash tras copiarse.",
-    "backup.copying": "Copiando {count}/{total}…",
-    "backup.copyDone": "Copia completa",
-    "backup.copyCancelled": "Copia cancelada",
-    "backup.copyCopied": "Copiados: {n} ({bytes})",
-    "backup.copyVerified": "{n} verificados por hash",
-    "backup.copySkipped": "{n} ya existían",
-    "backup.copyFailed": "{n} fallaron",
-
-    // ── Sidebar ──
     "sidebar.emptyHint": "Importá o escaneá un disco para empezar.",
     "sidebar.loading": "cargando…",
     "sidebar.noSubfolders": "(sin subcarpetas)",
@@ -396,7 +362,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.offline": "offline",
     "compare.identical": "El destino ya tiene todo lo del origen. Backup completo ✓",
     "compare.missing": "Faltan en el destino",
-    "compare.mismatch": "Tamaño distinto",
+    "compare.mismatch": "Contenido distinto",
     "compare.extra": "Sobran en el destino",
     "compare.conflicts": "Conflictos de tipo",
     "compare.conflictHint":
@@ -406,7 +372,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.filesCount": "{count} archivos",
     "compare.itemsCount": "{count} ítems",
     "compare.andMore": "…y {count} más",
-    "compare.includeMismatch": "Incluir archivos con tamaño distinto (sobrescribe)",
+    "compare.includeMismatch": "Reemplazar también los que difieren (sobrescribe en el destino)",
     "compare.copy": "Copiar faltantes al destino",
     "compare.copying": "copiando…",
     "compare.cancel": "Cancelar",
@@ -417,6 +383,19 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.rescanHint": "Re-escaneá el destino para que el catálogo refleje los archivos nuevos.",
 
     // ── Errores del backend (fase 2) ──
+    "compare.modeFast": "Rápido",
+    "compare.modeDeep": "Profundo",
+    "compare.modeFastHelp":
+      "Compara por nombre y tamaño. Instantáneo, pero no detecta un archivo dañado que conserve el tamaño.",
+    "compare.modeDeepHelp":
+      "Compara por hash BLAKE3: detecta cualquier diferencia de contenido. Necesita que ambos discos se hayan escaneado con la opción de hash.",
+    "compare.unverified": "Sin verificar",
+    "compare.unverifiedHint":
+      "Están en el destino con el mismo tamaño, pero falta el hash de algún lado para confirmar que el contenido coincide. Re-escaneá con hash para salir de la duda.",
+    "compare.identicalPartial":
+      "El destino tiene todo lo del origen ({ok} verificados), pero {n} no se pudieron verificar por contenido.",
+    "compare.verified": "{n} verificados por hash.",
+    "compare.skipped": "{n} salteados (ya existían).",
     "error.noCatalog": "no hay catálogo abierto",
     "error.noCatalogScan": "no hay catálogo abierto: creá o abrí uno antes de escanear",
     "error.openCatalogFirst": "abrí un catálogo antes de compartirlo",
@@ -624,7 +603,6 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.countRows": "{count} rows in view",
     "toolbar.viewTable": "Table view",
     "toolbar.viewGrid": "Gallery view",
-    "toolbar.backup": "Backup",
     "toolbar.gather": "Gather ({count})",
     "toolbar.gatherTitle": "Gather the selection into a folder (copy disk by disk)",
 
@@ -643,39 +621,6 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "gather.failedN": "{n} failed",
     "gather.connect": "Connect {name}",
     "gather.help": "Connect each disk and copy its group. Per-disk structure is preserved; nothing is overwritten and each file is hash-verified.",
-
-    // ── Backup audit (B1) ──
-    "backup.title": "Backup audit",
-    "backup.source": "Source",
-    "backup.dest": "Destination (backup)",
-    "backup.compare": "Compare",
-    "backup.pickDisk": "Pick a disk…",
-    "backup.help":
-      "Compares which source files are present in the destination. Works even if the disks are offline (it compares the catalog). Verifies by hash if you scanned with “Compute hashes”.",
-    "backup.allBackedUp": "Fully backed up: {n} files verified by hash.",
-    "backup.allPresentUnverified": "All present, but {n} not hash-verified (scan with “Compute hashes” to confirm).",
-    "backup.missingSummary": "{n} files missing ({bytes}) in the destination.",
-    "backup.ok": "verified",
-    "backup.missing": "missing",
-    "backup.mismatch": "differ",
-    "backup.unverified": "unverified",
-    "backup.extra": "extra in dest",
-    "backup.mismatchTitle": "Differ (partial or corrupt copy!)",
-    "backup.missingTitle": "Missing in destination",
-    "backup.unverifiedTitle": "Present, not hash-verified",
-    "backup.andMore": "…and {n} more",
-    "backup.copyMissing": "Copy what's missing ({n} · {bytes})",
-    "backup.copyHelp": "Copies the missing files to the destination. Requires both disks mounted. Never overwrites anything and verifies each copy by hash.",
-    "backup.confirmCopy": "Copy {n} files ({bytes}) to the destination?\n\nRequires both disks mounted. Nothing existing is overwritten; each file is hash-verified after copying.",
-    "backup.copying": "Copying {count}/{total}…",
-    "backup.copyDone": "Copy complete",
-    "backup.copyCancelled": "Copy cancelled",
-    "backup.copyCopied": "Copied: {n} ({bytes})",
-    "backup.copyVerified": "{n} hash-verified",
-    "backup.copySkipped": "{n} already existed",
-    "backup.copyFailed": "{n} failed",
-
-    // ── Sidebar ──
     "sidebar.emptyHint": "Import or scan a disk to get started.",
     "sidebar.loading": "loading…",
     "sidebar.noSubfolders": "(no subfolders)",
@@ -847,7 +792,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.offline": "offline",
     "compare.identical": "The destination already has everything from the source. Backup complete ✓",
     "compare.missing": "Missing on destination",
-    "compare.mismatch": "Size differs",
+    "compare.mismatch": "Content differs",
     "compare.extra": "Extra on destination",
     "compare.conflicts": "Type conflicts",
     "compare.conflictHint":
@@ -857,7 +802,7 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.filesCount": "{count} files",
     "compare.itemsCount": "{count} items",
     "compare.andMore": "…and {count} more",
-    "compare.includeMismatch": "Include files with a different size (overwrites)",
+    "compare.includeMismatch": "Also replace the ones that differ (overwrites in the destination)",
     "compare.copy": "Copy missing to destination",
     "compare.copying": "copying…",
     "compare.cancel": "Cancel",
@@ -868,6 +813,19 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.rescanHint": "Re-scan the destination so the catalog reflects the new files.",
 
     // ── Backend errors (phase 2) ──
+    "compare.modeFast": "Fast",
+    "compare.modeDeep": "Deep",
+    "compare.modeFastHelp":
+      "Compares by name and size. Instant, but blind to a damaged file that kept its size.",
+    "compare.modeDeepHelp":
+      "Compares by BLAKE3 hash: catches any difference in content. Requires both disks to have been scanned with hashing on.",
+    "compare.unverified": "Unverified",
+    "compare.unverifiedHint":
+      "Present in the destination at the same size, but a hash is missing on one side, so the content can't be confirmed. Re-scan with hashing to settle it.",
+    "compare.identicalPartial":
+      "The destination has everything from the source ({ok} verified), but {n} couldn't be verified by content.",
+    "compare.verified": "{n} verified by hash.",
+    "compare.skipped": "{n} skipped (already there).",
     "error.noCatalog": "no catalog open",
     "error.noCatalogScan": "no catalog open: create or open one before scanning",
     "error.openCatalogFirst": "open a catalog before sharing it",

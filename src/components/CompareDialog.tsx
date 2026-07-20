@@ -10,6 +10,10 @@ import {
   Folder,
   ChevronRight,
   HardDrive,
+  HelpCircle,
+  ShieldCheck,
+  Zap,
+  CheckCircle2,
 } from "lucide-react";
 import {
   api,
@@ -193,12 +197,38 @@ function DiffList({
   );
 }
 
+/** Pestaña del selector de criterio (rápido / profundo). */
+function ModeButton({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-xs ${
+        active ? "bg-sky-600 font-medium text-white" : "text-neutral-400 hover:text-neutral-200"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
 export function CompareDialog({ onClose }: { onClose: () => void }) {
   const t = useT();
   const [disks, setDisks] = useState<DiskRow[]>([]);
   const [src, setSrc] = useState<Scope>(emptyScope);
   const [dst, setDst] = useState<Scope>(emptyScope);
   const [diff, setDiff] = useState<DiskDiff | null>(null);
+  const [deep, setDeep] = useState(false);
   const [comparing, setComparing] = useState(false);
   const [includeMismatch, setIncludeMismatch] = useState(false);
   const [copying, setCopying] = useState(false);
@@ -231,6 +261,15 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   const scopeLabel = (s: Scope) =>
     s.crumbs.length <= 1 ? t("compare.wholeDisk") : s.crumbs.map((c) => c.name).join("/");
 
+  // Cambiar de criterio invalida lo mostrado: un diff por tamaño y uno por hash
+  // no son comparables, y dejarlo en pantalla induciría a copiar con el criterio
+  // equivocado.
+  function changeMode(next: boolean) {
+    setDeep(next);
+    setDiff(null);
+    setResult(null);
+  }
+
   async function runCompare() {
     if (!ready || sameScope) return;
     setComparing(true);
@@ -238,7 +277,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
     setResult(null);
     setError(null);
     try {
-      setDiff(await api.compareDisks(src.diskId!, dst.diskId!, src.rootId, dst.rootId));
+      setDiff(await api.compareDisks(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -257,10 +296,12 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
     setError(null);
     setProgress(null);
     try {
-      const s = await api.mirrorCopyMissing(src.diskId!, dst.diskId!, src.rootId, dst.rootId, includeMismatch);
+      const s = await api.copyMissing(src.diskId!, dst.diskId!, src.rootId, dst.rootId, deep, includeMismatch);
       setResult(
         (s.cancelled ? t("compare.cancelled") + " " : "") +
           t("compare.done", { copied: formatCount(s.copied), failed: formatCount(s.failed) }) +
+          " " + t("compare.verified", { n: formatCount(s.verified) }) +
+          (s.skipped > 0 ? " " + t("compare.skipped", { n: formatCount(s.skipped) }) : "") +
           (s.needs_rescan ? " " + t("compare.rescanHint") : ""),
       );
       if (s.errors.length > 0) setError(s.errors.slice(0, 5).join("\n"));
@@ -290,6 +331,18 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       )}
       {sameScope && <p className="mb-3 text-xs text-amber-400">{t("compare.sameDisk")}</p>}
 
+      {/* Criterio de comparación. Rápido alcanza para "¿está todo?"; profundo
+          responde "¿está todo Y sano?", que es lo que importa en un backup. */}
+      <div className="mb-3 flex flex-col gap-1.5">
+        <div className="inline-flex w-fit rounded border border-border p-0.5">
+          <ModeButton active={!deep} onClick={() => changeMode(false)} icon={<Zap className="h-3 w-3" />} label={t("compare.modeFast")} />
+          <ModeButton active={deep} onClick={() => changeMode(true)} icon={<ShieldCheck className="h-3 w-3" />} label={t("compare.modeDeep")} />
+        </div>
+        <p className="text-[11px] text-neutral-500">
+          {deep ? t("compare.modeDeepHelp") : t("compare.modeFastHelp")}
+        </p>
+      </div>
+
       <button
         onClick={runCompare}
         disabled={!ready || sameScope || comparing}
@@ -302,8 +355,14 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       {diff && (
         <div className="space-y-4">
           {diff.missing_count === 0 && diff.mismatch_count === 0 && diff.conflict_count === 0 ? (
-            <p className="rounded border border-emerald-800/50 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-300">
-              {t("compare.identical")}
+            <p className="flex items-center gap-2 rounded border border-emerald-800/50 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-300">
+              <CheckCircle2 className="h-4 w-4 shrink-0" />
+              {deep && diff.unverified_count > 0
+                ? t("compare.identicalPartial", {
+                    ok: formatCount(diff.ok_count),
+                    n: formatCount(diff.unverified_count),
+                  })
+                : t("compare.identical")}
             </p>
           ) : (
             <>
@@ -334,6 +393,19 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
                   </h3>
                   <p className="mb-1.5 text-[11px] text-neutral-500">{t("compare.conflictHint")}</p>
                   <DiffList entries={diff.conflicts} count={diff.conflict_count} kind="conflict" />
+                </section>
+              )}
+              {/* Solo el modo profundo produce "no verificado": están presentes y
+                  del mismo tamaño, pero falta el hash para poder afirmar que el
+                  contenido coincide. No es un error, es una zona ciega. */}
+              {diff.unverified_count > 0 && (
+                <section>
+                  <h3 className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-neutral-300">
+                    <HelpCircle className="h-3.5 w-3.5" /> {t("compare.unverified")} ·{" "}
+                    {t("compare.filesCount", { count: formatCount(diff.unverified_count) })}
+                  </h3>
+                  <p className="mb-1.5 text-[11px] text-neutral-500">{t("compare.unverifiedHint")}</p>
+                  <DiffList entries={diff.unverified} count={diff.unverified_count} kind="missing" />
                 </section>
               )}
               {diff.extra_count > 0 && (
@@ -370,7 +442,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
                 <div className="flex items-center gap-2">
                   {copying ? (
                     <button
-                      onClick={() => api.mirrorCancelCopy()}
+                      onClick={() => dst.diskId != null && api.cancelCopy(dst.diskId)}
                       className="inline-flex items-center gap-1.5 rounded border border-red-900/60 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950/50"
                     >
                       <X className="h-3.5 w-3.5" /> {t("compare.cancel")}

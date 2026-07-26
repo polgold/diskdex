@@ -1304,6 +1304,24 @@ pub fn entry_path(conn: &Connection, entry_id: i64) -> DbResult<String> {
     }
 }
 
+/// Cadena de carpetas ancestro de una entrada, desde la raíz del disco hasta su
+/// carpeta contenedora (sin incluir la entrada misma). Cada una con su id y
+/// nombre, para armar un breadcrumb navegable. OFFLINE: solo lee el catálogo,
+/// así se puede saltar desde un resultado de búsqueda a la carpeta que lo
+/// contiene aunque el disco esté desconectado.
+pub fn entry_ancestors(conn: &Connection, entry_id: i64) -> DbResult<Vec<(i64, String)>> {
+    let sql = "WITH RECURSIVE anc(id, parent_id, name, depth) AS (
+                 SELECT id, parent_id, name, 0 FROM entries WHERE id = ?1
+                 UNION ALL
+                 SELECT e.id, e.parent_id, e.name, anc.depth + 1
+                 FROM entries e JOIN anc ON e.id = anc.parent_id
+               )
+               SELECT id, name FROM anc WHERE depth > 0 ORDER BY depth DESC";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![entry_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
 /// Trae una entrada por id (para el inspector).
 pub fn get_entry(conn: &Connection, entry_id: i64) -> DbResult<Option<EntryRow>> {
     let sql = format!("SELECT {ENTRY_COLS} FROM entries e WHERE e.id = ?1");

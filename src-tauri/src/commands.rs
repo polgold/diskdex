@@ -457,6 +457,18 @@ pub fn list_children(
     db::list_children(&cat.conn, disk_id, parent_id).map_err(|e| e.to_string())
 }
 
+/// Ancestros (carpetas) de una entrada, para navegar desde un resultado de
+/// búsqueda a la carpeta que lo contiene. OFFLINE: no requiere el disco montado.
+#[tauri::command(async)]
+pub fn entry_ancestors(
+    state: tauri::State<'_, AppState>,
+    entry_id: i64,
+) -> Result<Vec<(i64, String)>, String> {
+    let guard = state.catalog.lock().unwrap();
+    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
+    db::entry_ancestors(&cat.conn, entry_id).map_err(|e| e.to_string())
+}
+
 /// M2: ruta completa de una entrada.
 #[tauri::command(async)]
 pub fn entry_path(state: tauri::State<'_, AppState>, entry_id: i64) -> Result<String, String> {
@@ -833,7 +845,10 @@ pub async fn copy_missing(
     include_mismatch: bool,
     // Carpetas elegidas. Vacío/ausente = copiar todo lo que falte.
     prefixes: Option<Vec<String>>,
+    // Verificar por hash cada archivo copiado (~2× más lento). Ausente = no.
+    verify: Option<bool>,
 ) -> Result<CopySummary, String> {
+    let verify = verify.unwrap_or(false);
     if src_disk_id == dst_disk_id && src_root_id == dst_root_id {
         return Err("El origen y el destino no pueden ser la misma carpeta.".into());
     }
@@ -905,6 +920,7 @@ pub async fn copy_missing(
             &dst_root,
             total,
             bytes_total,
+            verify,
             || copy_cancel_requested(&cancel_probe),
             |done, bytes_done, current| {
                 let _ = app.emit(
@@ -949,6 +965,9 @@ fn run_copy(
     dst_root: &std::path::Path,
     total: i64,
     _bytes_total: i64,
+    // Re-leer cada archivo del destino para confirmar el hash. Cuesta ~2× por el
+    // doble I/O, así que es opt-in: por defecto se usa la copia rápida del kernel.
+    verify: bool,
     is_cancelled: impl Fn() -> bool,
     mut on_progress: impl FnMut(i64, i64, &str),
 ) -> CopySummary {
@@ -1007,13 +1026,20 @@ fn run_copy(
             continue;
         }
 
-        // Copia atómica (temporal + fsync + rename) con verificación por hash:
-        // relee lo escrito y confirma que hashea igual que el origen. Si no,
-        // borra el destino y devuelve error en vez de dejar basura silenciosa.
-        match scan::copy_file_verified(&src_path, &dst_path) {
+        // Ambas rutas son atómicas (temporal + rename), así que el destino nunca
+        // queda a medias. La verificada, además, re-lee el archivo y confirma su
+        // hash contra el origen — más segura, la mitad de rápida.
+        let res = if verify {
+            scan::copy_file_verified(&src_path, &dst_path)
+        } else {
+            scan::copy_file_fast(&src_path, &dst_path)
+        };
+        match res {
             Ok(n) => {
                 copied += 1;
-                verified += 1;
+                if verify {
+                    verified += 1;
+                }
                 bytes_copied += n as i64;
                 copied_items.push((item.rel_path.clone(), n as i64, false));
             }
@@ -1061,7 +1087,7 @@ mod copy_tests {
             db::CopyItem { rel_path: "CLIP/A.MP4".into(), size: 11, is_folder: false , overwrite: false },
             db::CopyItem { rel_path: "README.txt".into(), size: 3, is_folder: false , overwrite: false },
         ];
-        let summary = run_copy(&plan, &src, &dst, 2, 14, || false, |_, _, _| {});
+        let summary = run_copy(&plan, &src, &dst, 2, 14, true, || false, |_, _, _| {});
 
         assert_eq!(summary.copied, 2);
         assert_eq!(summary.failed, 0);
@@ -1090,7 +1116,7 @@ mod copy_tests {
         std::fs::create_dir_all(&dst).unwrap();
 
         let plan = vec![db::CopyItem { rel_path: "VACIA".into(), size: 0, is_folder: true , overwrite: false }];
-        let summary = run_copy(&plan, &src, &dst, 1, 0, || false, |_, _, _| {});
+        let summary = run_copy(&plan, &src, &dst, 1, 0, false, || false, |_, _, _| {});
 
         assert_eq!(summary.copied, 1);
         assert_eq!(summary.failed, 0);
@@ -1111,7 +1137,7 @@ mod copy_tests {
 
         let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 1, is_folder: false , overwrite: false }];
         // Cancelado desde el arranque: no copia nada.
-        let summary = run_copy(&plan, &src, &dst, 1, 1, || true, |_, _, _| {});
+        let summary = run_copy(&plan, &src, &dst, 1, 1, false, || true, |_, _, _| {});
         assert!(summary.cancelled);
         assert_eq!(summary.copied, 0);
         assert!(!dst.join("A.bin").exists());
@@ -1134,7 +1160,7 @@ mod copy_tests {
 
         // overwrite: false → se saltea y el destino queda intacto.
         let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 5, is_folder: false, overwrite: false }];
-        let summary = run_copy(&plan, &src, &dst, 1, 5, || false, |_, _, _| {});
+        let summary = run_copy(&plan, &src, &dst, 1, 5, true, || false, |_, _, _| {});
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.copied, 0);
         assert_eq!(std::fs::read(dst.join("A.bin")).unwrap(), b"existente");
@@ -1148,7 +1174,7 @@ mod copy_tests {
 
         // overwrite: true → reemplaza y verifica por hash.
         let plan = vec![db::CopyItem { rel_path: "A.bin".into(), size: 5, is_folder: false, overwrite: true }];
-        let summary = run_copy(&plan, &src, &dst, 1, 5, || false, |_, _, _| {});
+        let summary = run_copy(&plan, &src, &dst, 1, 5, true, || false, |_, _, _| {});
         assert_eq!(summary.skipped, 0);
         assert_eq!(summary.copied, 1);
         assert_eq!(summary.verified, 1, "toda copia se relee y se verifica");

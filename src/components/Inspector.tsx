@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Folder, File as FileIcon, Info, FolderSearch, ExternalLink, Copy, Check, Tag, X, Film, Package, FolderClosed, MapPin } from "lucide-react";
-import { api, type EntryRow, type VideoMeta, type ArchiveEntry, type EntryMeta } from "../lib/ipc";
+import { Folder, File as FileIcon, Info, FolderSearch, ExternalLink, Copy, Check, Tag, X, Film, Package, FolderClosed, MapPin, HardDrive } from "lucide-react";
+import { api, type EntryRow, type VideoMeta, type ArchiveEntry, type EntryMeta, type DiskDetail } from "../lib/ipc";
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatDate, formatDuration, formatBitrate, formatCount } from "../lib/format";
 import { revealOriginal, openOriginal, copyText } from "../lib/actions";
@@ -10,6 +10,7 @@ import { useT } from "../lib/i18n";
 export function Inspector() {
   const t = useT();
   const selectedEntryId = useCatalog((s) => s.selectedEntryId);
+  const selectedDiskId = useCatalog((s) => s.selectedDiskId);
   const [entry, setEntry] = useState<EntryRow | null>(null);
   const [path, setPath] = useState<string>("");
 
@@ -32,6 +33,12 @@ export function Inspector() {
       cancelled = true;
     };
   }, [selectedEntryId]);
+
+  // Sin archivo seleccionado pero con un disco elegido: mostrar la info del disco
+  // (tamaño, libre, estado). Todo sale del catálogo, así que sirve offline.
+  if (!entry && selectedDiskId != null) {
+    return <DiskPanel diskId={selectedDiskId} />;
+  }
 
   if (!entry) {
     return (
@@ -520,6 +527,86 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
     <div className="flex items-baseline justify-between gap-3">
       <dt className="shrink-0 text-neutral-500">{label}</dt>
       <dd className={`text-right text-neutral-200 ${mono ? "font-mono" : ""}`}>{value}</dd>
+    </div>
+  );
+}
+
+
+/** Info de un disco (al seleccionarlo en la lista, sin abrir un archivo). Todo
+ *  sale del catálogo: funciona con el disco desconectado. El espacio libre real
+ *  solo se conoce si está montado; si no, se estima con la capacidad guardada. */
+function DiskPanel({ diskId }: { diskId: number }) {
+  const t = useT();
+  const [d, setD] = useState<DiskDetail | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setD(null);
+    api.diskDetail(diskId).then((x) => !cancelled && setD(x)).catch(() => {});
+    return () => { cancelled = true; };
+  }, [diskId]);
+
+  if (!d) {
+    return (
+      <div className="flex h-full items-center justify-center p-4 text-xs text-neutral-600">
+        {t("common.loading")}
+      </div>
+    );
+  }
+
+  const total = d.live_total ?? d.capacity ?? null;
+  const free = d.live_free ?? (d.capacity != null ? Math.max(0, d.capacity - d.total_size) : null);
+  const used = total != null && free != null ? total - free : d.total_size;
+  const pct = total && total > 0 ? Math.min(100, Math.round((used / total) * 100)) : null;
+  const liveFree = d.live_free != null; // libre medido en vivo vs estimado
+
+  return (
+    <div className="flex h-full flex-col overflow-auto p-4">
+      <div className="flex items-start gap-2">
+        <HardDrive className="mt-0.5 h-6 w-6 shrink-0 text-sky-400/80" />
+        <div className="min-w-0">
+          <h2 className="break-words text-sm font-medium leading-snug">{d.name}</h2>
+          <span className={`text-[11px] ${d.is_online ? "text-emerald-400" : "text-neutral-500"}`}>
+            {d.is_online ? t("common.online") : t("common.offline")}
+          </span>
+        </div>
+      </div>
+
+      {/* Barra de uso */}
+      {total != null && (
+        <div className="mt-4">
+          <div className="h-2 w-full overflow-hidden rounded bg-neutral-800">
+            <div className="h-full bg-emerald-500" style={{ width: `${pct ?? 0}%` }} />
+          </div>
+          <p className="mt-1 text-[11px] text-neutral-400">
+            {t("disk.usedFree", {
+              used: formatBytes(used),
+              free: free != null ? formatBytes(free) : "—",
+              total: formatBytes(total),
+            })}
+            {!liveFree && free != null && (
+              <span className="text-neutral-600"> · {t("disk.estimated")}</span>
+            )}
+          </p>
+        </div>
+      )}
+
+      <dl className="mt-4 space-y-2 text-xs">
+        <Row label={t("disk.cataloged")} value={formatBytes(d.total_size)} />
+        <Row label={t("stats.files")} value={formatCount(d.file_count)} />
+        <Row label={t("stats.folders")} value={formatCount(d.folder_count)} />
+        {d.kind && <Row label={t("inspector.type")} value={d.kind} />}
+        {d.scanned_at && <Row label={t("disk.lastScan")} value={formatDate(d.scanned_at)} />}
+      </dl>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-neutral-800/60 pb-1.5">
+      <dt className="text-neutral-500">{label}</dt>
+      <dd className="text-neutral-300">{value}</dd>
     </div>
   );
 }

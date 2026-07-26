@@ -12,6 +12,8 @@ export interface CopyRequest {
   includeMismatch: boolean;
   /** Carpetas elegidas. Vacío = todo lo que falte. */
   prefixes: string[];
+  /** Verificar por hash cada archivo copiado (más lento). */
+  verify: boolean;
   /** "SFBACKUP7/PLANTA&CANTA → SFBACKUP8/CLIENTES" — para la barra de progreso. */
   label: string;
   /** Ítems planificados: permite mostrar cuántos faltan sin re-comparar. */
@@ -58,6 +60,7 @@ export const useCopy = create<CopyState>((set, get) => ({
         req.deep,
         req.includeMismatch,
         req.prefixes,
+        req.verify,
       );
       set({ lastSummary: { ...s, label: req.label } });
       notifyTaskDone(s, req.label);

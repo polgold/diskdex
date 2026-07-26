@@ -18,6 +18,7 @@ import {
   HelpCircle,
   Sparkles,
 } from "lucide-react";
+import { DiskGrid } from "./DiskGrid";
 import { useCatalog } from "../store/catalog";
 import { formatBytes, formatDate, formatCount, formatAge, formatDuration } from "../lib/format";
 import { api, type SearchItem, type SemanticItem, type EntryRow, type DiskDetail } from "../lib/ipc";
@@ -546,12 +547,7 @@ function BrowseTable() {
   }, [rows, selectedIndex, selectEntry, setSelection, selectedIds, selectedEntryId, reloadCurrent, setError, openFolder, rv, t]);
 
   if (selectedDiskId == null) {
-    return (
-      <Centered>
-        <Folder className="h-10 w-10 text-neutral-700" />
-        <p className="text-sm text-neutral-500">{t("table.pickDisk")}</p>
-      </Centered>
-    );
+    return <DiskGrid />;
   }
 
   return (
@@ -675,6 +671,7 @@ function BrowseTable() {
 function SearchTable() {
   const t = useT();
   const result = useCatalog((s) => s.searchResult);
+  const jumpToEntry = useCatalog((s) => s.jumpToEntry);
   const searching = useCatalog((s) => s.searching);
   const selectedEntryId = useCatalog((s) => s.selectedEntryId);
   const selectedIds = useCatalog((s) => s.selectedIds);
@@ -772,8 +769,10 @@ function SearchTable() {
           selectedEntryId={selectedEntryId}
           onPick={(e, i) => applyClickSelection(e, items, i, selectedIds, anchorRef, setSelection)}
           onOpen={(it) => {
-            const fn = it.is_folder ? revealOriginal : openOriginal;
-            fn(it.id).catch((err) => setError(String(err)));
+            // Carpeta: navegar su estructura desde el catálogo (funciona offline).
+            // Archivo: abrir el original, que sí requiere el disco montado.
+            if (it.is_folder) jumpToEntry(it);
+            else openOriginal(it.id).catch((err) => setError(String(err)));
           }}
           onMenu={(e, it) => {
             e.preventDefault();
@@ -810,7 +809,8 @@ function SearchTable() {
                 key={it.id}
                 onClick={(ev) => applyClickSelection(ev, items, vi.index, selectedIds, anchorRef, setSelection)}
                 onDoubleClick={() => {
-                  const fn = it.is_folder ? revealOriginal : openOriginal;
+                  if (it.is_folder) { jumpToEntry(it); return; }
+                  const fn = openOriginal;
                   fn(it.id).catch((err) => setError(String(err)));
                 }}
                 onContextMenu={(ev) => {
@@ -1067,10 +1067,6 @@ function RowOverlay({ text }: { text: string }) {
       {text}
     </div>
   );
-}
-
-function Centered({ children }: { children: React.ReactNode }) {
-  return <div className="flex h-full flex-col items-center justify-center gap-3 text-center">{children}</div>;
 }
 
 // ── Vista galería (grilla de miniaturas, virtualizada por filas) ───────────────

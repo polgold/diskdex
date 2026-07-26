@@ -292,21 +292,54 @@ pub fn hash_file(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+/// Prepara la ruta temporal junto al destino (mismo volumen → rename atómico) y
+/// crea los directorios padre. Devuelve `<dst>.ddtmp`.
+fn prepare_tmp(dst: &Path) -> std::io::Result<PathBuf> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut tmp_os = dst.as_os_str().to_owned();
+    tmp_os.push(".ddtmp");
+    Ok(PathBuf::from(tmp_os))
+}
+
+/// Copia RÁPIDA y atómica, sin verificación. Delega en `fs::copy`, que en macOS
+/// usa `fcopyfile` del kernel (la misma vía acelerada que usa Finder: copia por
+/// bloques grandes, sin `fsync` por archivo), a un temporal + `rename`.
+///
+/// Sigue siendo atómica —el destino nunca queda a medias— y NO sobreescribe: el
+/// llamador garantiza que `dst` no exista (o pasa por una ruta que lo permita).
+/// Lo que NO hace, y por eso vuela con miles de archivos chicos, es re-leer el
+/// destino para hashearlo ni forzar el flush a disco archivo por archivo.
+/// Devuelve los bytes copiados.
+pub fn copy_file_fast(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    let tmp = prepare_tmp(dst)?;
+    let n = match fs::copy(src, &tmp) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    if let Err(e) = fs::rename(&tmp, dst) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(n)
+}
+
 /// Copia `src` → `dst` de forma atómica y VERIFICADA (B2). Escribe a un temporal
 /// `<dst>.ddtmp` mientras calcula el BLAKE3 del origen en una sola lectura, hace
 /// `fsync` + `rename` (atómico: nunca deja un archivo a medias en el destino), y
 /// re-hashea el destino para confirmar que coincide. Si la verificación falla,
 /// borra el destino y devuelve error. Crea los directorios padre. NO sobreescribe:
 /// el llamador debe garantizar que `dst` no exista. Devuelve los bytes copiados.
+///
+/// El doble I/O (escribir + re-leer) la hace ~2× más lenta que `copy_file_fast`;
+/// se usa solo cuando el usuario pide verificación explícita.
 pub fn copy_file_verified(src: &Path, dst: &Path) -> std::io::Result<u64> {
     use std::io::{Read, Write};
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // Temporal junto al destino (mismo volumen → rename atómico).
-    let mut tmp_os = dst.as_os_str().to_owned();
-    tmp_os.push(".ddtmp");
-    let tmp = PathBuf::from(tmp_os);
+    let tmp = prepare_tmp(dst)?;
 
     let mut fin = fs::File::open(src)?;
     let mut fout = fs::File::create(&tmp)?;
@@ -886,6 +919,25 @@ mod tests {
         // Cancelación: devuelve Interrupted.
         let cancelled = enrich_entries(&base, &disk, &mut |_, _| {}, &|| true);
         assert!(cancelled.is_err());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn copy_file_fast_copies_atomically() {
+        let base = std::env::temp_dir().join(format!("diskdex_fast_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let src = base.join("src.bin");
+        fs::write(&src, b"contenido del clip original").unwrap();
+        // Destino con carpetas inexistentes: copy_file_fast crea los padres.
+        let dst = base.join("BACKUP/DCIM/src.bin");
+
+        let n = copy_file_fast(&src, &dst).unwrap();
+        assert_eq!(n, "contenido del clip original".len() as u64);
+        assert_eq!(fs::read(&dst).unwrap(), b"contenido del clip original");
+        // No quedó ningún temporal (la copia es temp + rename).
+        assert!(!base.join("BACKUP/DCIM/src.bin.ddtmp").exists());
 
         let _ = fs::remove_dir_all(&base);
     }

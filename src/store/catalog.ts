@@ -82,6 +82,10 @@ interface CatalogState {
   openDisk: (disk: DiskRow) => Promise<void>;
   openFolder: (entry: EntryRow) => Promise<void>;
   gotoFolder: (diskId: number, parentId: number | null, breadcrumb: Crumb[]) => Promise<void>;
+  /** Salta a una carpeta (o a la carpeta que contiene un archivo) desde cualquier
+   *  lado —típicamente un resultado de búsqueda— reconstruyendo su breadcrumb
+   *  desde el catálogo. Funciona offline. */
+  jumpToEntry: (entry: { id: number; disk_id: number; disk_name: string; is_folder: boolean; name: string }) => Promise<void>;
   navigateToCrumb: (index: number) => Promise<void>;
   selectEntry: (id: number | null) => void;
   setSelection: (ids: number[], primary: number | null) => void;
@@ -262,6 +266,33 @@ export const useCatalog = create<CatalogState>((set, get) => ({
     try {
       const entries = await api.listChildren(diskId, entry.id);
       if (token === navToken) set({ contentEntries: entries, contentLoading: false });
+    } catch (e) {
+      if (token === navToken) set({ error: String(e), contentLoading: false });
+    }
+  },
+
+  jumpToEntry: async (entry) => {
+    const token = ++navToken;
+    set({ mode: "browse", contentLoading: true, contentEntries: [] });
+    try {
+      const anc = await api.entryAncestors(entry.id); // [[id,nombre], …] raíz→contenedora
+      // Una carpeta se abre a sí misma; un archivo abre la carpeta que lo contiene.
+      const trail = entry.is_folder ? [...anc, [entry.id, entry.name] as [number, string]] : anc;
+      const crumbs: Crumb[] = [
+        { id: null, name: entry.disk_name },
+        ...trail.map(([id, name]) => ({ id, name })),
+      ];
+      const parentId = trail.length > 0 ? trail[trail.length - 1][0] : null;
+      const entries = await api.listChildren(entry.disk_id, parentId);
+      if (token === navToken)
+        set({
+          selectedDiskId: entry.disk_id,
+          breadcrumb: crumbs,
+          contentEntries: entries,
+          contentLoading: false,
+          selectedEntryId: entry.is_folder ? null : entry.id,
+          selectedIds: entry.is_folder ? [] : [entry.id],
+        });
     } catch (e) {
       if (token === navToken) set({ error: String(e), contentLoading: false });
     }

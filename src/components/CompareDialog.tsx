@@ -246,6 +246,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
   const [tree, setTree] = useState<MissingNode[]>([]);
+  const [verify, setVerify] = useState(false);
   // Conjunto mínimo de carpetas elegidas. "" = todo (el default tras comparar).
   const [selected, setSelected] = useState<Set<string>>(new Set([""]));
 
@@ -369,6 +370,7 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       // "" (todo) se manda como lista vacía: es lo que el backend interpreta
       // como "sin filtro", y evita depender de que "" matchee como prefijo.
       prefixes: selected.has("") ? [] : Array.from(selected),
+      verify,
       label: `${scopeLabel(src)} → ${scopeLabel(dst)}`,
       planned: selectedCount,
     });
@@ -438,6 +440,13 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
               {t("compare.includeMismatch")}
             </label>
           )}
+          <label className="flex items-start gap-2 text-xs text-neutral-300">
+            <input type="checkbox" className="mt-0.5" checked={verify} onChange={(e) => setVerify(e.target.checked)} />
+            <span>
+              {t("compare.verifyCopy")}
+              <span className="block text-[11px] text-neutral-500">{t("compare.verifyCopyHint")}</span>
+            </span>
+          </label>
 
           {copying && (
             <TransferAnimation

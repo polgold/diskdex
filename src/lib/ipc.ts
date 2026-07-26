@@ -277,6 +277,7 @@ export const api = {
   listChildren: (diskId: number, parentId: number | null) =>
     invoke<EntryRow[]>("list_children", { diskId, parentId }),
   entryPath: (entryId: number) => invoke<string>("entry_path", { entryId }),
+  entryAncestors: (entryId: number) => invoke<[number, string][]>("entry_ancestors", { entryId }),
   getEntry: (entryId: number) => invoke<EntryRow | null>("get_entry", { entryId }),
   getEntryMeta: (entryId: number) => invoke<EntryMeta>("get_entry_meta", { entryId }),
 
@@ -366,9 +367,11 @@ export const api = {
     includeMismatch: boolean,
     /** Carpetas elegidas. Vacío = copiar todo lo que falte. */
     prefixes: string[] = [],
+    /** Verificar por hash cada archivo (~2× más lento). Default false. */
+    verify = false,
   ) =>
     invoke<CopySummary>("copy_missing", {
-      srcDiskId, dstDiskId, srcRootId, dstRootId, deep, includeMismatch, prefixes,
+      srcDiskId, dstDiskId, srcRootId, dstRootId, deep, includeMismatch, prefixes, verify,
     }),
   /** Faltantes agregados por carpeta (exacto, sin recorte) para elegir qué copiar. */
   missingTree: (

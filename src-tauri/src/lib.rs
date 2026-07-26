@@ -91,6 +91,7 @@ pub fn run() {
             commands::disk_detail,
             commands::list_children,
             commands::entry_path,
+            commands::entry_ancestors,
             commands::get_entry,
             commands::get_entry_meta,
             commands::search_entries,

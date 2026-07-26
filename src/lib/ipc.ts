@@ -21,6 +21,10 @@ export interface DiskRow {
   location: string | null;
   category: string | null;
   comment: string | null;
+  /** Capacidad total del volumen (último estado conocido). */
+  capacity: number | null;
+  /** Espacio libre del último estado conocido. */
+  free_space: number | null;
 }
 
 export interface TrashFailure {
@@ -46,6 +50,8 @@ export interface DiskDetail {
   scanned_at: number | null;
   live_total: number | null;
   live_free: number | null;
+  /** Espacio libre del último estado conocido (guardado). */
+  stored_free: number | null;
 }
 
 export interface EntryRow {

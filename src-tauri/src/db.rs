@@ -296,6 +296,9 @@ fn apply_migrations(conn: &Connection) -> DbResult<()> {
         "ALTER TABLE entries ADD COLUMN light_phase  TEXT",
         "ALTER TABLE disks   ADD COLUMN cloud_provider TEXT",
         "ALTER TABLE disks   ADD COLUMN cloud_root     TEXT",
+        // Espacio libre del último estado conocido (al escanear o al detectar el
+        // disco online). Se guarda para mostrarlo sin tener el disco conectado.
+        "ALTER TABLE disks   ADD COLUMN free_space     INTEGER",
     ];
     for stmt in ADD_COLUMNS {
         match conn.execute(stmt, []) {
@@ -3780,6 +3783,23 @@ mod tests {
         ingest_scanned(&mut conn, &sample_disk(), None, "hdd", None, "/Volumes/SF41", None).unwrap();
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0)).unwrap();
         assert_eq!(total, 2); // uno con UUID-X + uno sin fingerprint
+    }
+
+    /// El espacio libre se persiste en la columna free_space y se lee de vuelta:
+    /// es lo que permite mostrar ocupado/libre con el disco desconectado.
+    #[test]
+    fn free_space_persists_and_reads_back() {
+        let mut conn = open_in_memory().unwrap();
+        ingest_scanned(&mut conn, &sample_disk(), Some("UUID-FS"), "ssd", Some(1_000_000), "/Volumes/SF28", None).unwrap();
+        let id: i64 = conn.query_row("SELECT id FROM disks WHERE volume_uuid='UUID-FS'", [], |r| r.get(0)).unwrap();
+        // Simular lo que hace refresh_online_status al detectar el disco montado.
+        conn.execute("UPDATE disks SET free_space = ?1, capacity = ?2 WHERE id = ?3",
+            params![250_000i64, 1_000_000i64, id]).unwrap();
+        let (free, cap): (Option<i64>, Option<i64>) = conn
+            .query_row("SELECT free_space, capacity FROM disks WHERE id = ?1", params![id],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(free, Some(250_000));
+        assert_eq!(cap, Some(1_000_000));
     }
 
     #[test]

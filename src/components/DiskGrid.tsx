@@ -56,9 +56,13 @@ function DiskCard({
   onOpen: () => void;
   t: (k: string, v?: Record<string, string | number>) => string;
 }) {
-  // El catálogo básico (listDisks) no trae capacity ni libre; con lo catalogado
-  // igual mostramos algo útil, y la barra aparece solo si hay total conocido.
-  const cataloged = disk.total_size;
+  // El último estado conocido (guardado al detectar el disco online) da total y
+  // libre; con eso mostramos la barra sin conectar nada. Si no hay capacidad
+  // guardada (catálogo viejo o disco nunca visto online), mostramos lo catalogado.
+  const total = disk.capacity;
+  const free = disk.free_space;
+  const used = total != null && free != null ? total - free : disk.total_size;
+  const pct = total && total > 0 ? Math.min(100, Math.round((used / total) * 100)) : null;
   return (
     <button
       onClick={onOpen}
@@ -74,8 +78,25 @@ function DiskCard({
           title={disk.is_online ? t("common.online") : t("common.offline")}
         />
       </div>
-      <div className="text-[11px] text-neutral-500">
-        {t("disk.usedShort", { used: formatBytes(cataloged) })} ·{" "}
+      {pct != null && total != null ? (
+        <>
+          <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
+            <div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="text-[11px] text-neutral-500">
+            {t("disk.usedFree", {
+              used: formatBytes(used),
+              free: free != null ? formatBytes(free) : "—",
+              total: formatBytes(total),
+            })}
+          </div>
+        </>
+      ) : (
+        <div className="text-[11px] text-neutral-500">
+          {t("disk.usedShort", { used: formatBytes(disk.total_size) })}
+        </div>
+      )}
+      <div className="text-[11px] text-neutral-600">
         {t("disk.filesShort", { n: formatCount(disk.file_count) })}
       </div>
       {disk.location && (

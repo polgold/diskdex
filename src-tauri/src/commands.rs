@@ -50,6 +50,11 @@ pub struct DiskRow {
     pub location: Option<String>,
     pub category: Option<String>,
     pub comment: Option<String>,
+    /// Capacidad total del volumen, del último estado conocido (o al escanear).
+    pub capacity: Option<i64>,
+    /// Espacio libre del último estado conocido. Permite mostrar ocupado/libre
+    /// en la lista de discos sin tenerlos conectados ni una consulta por disco.
+    pub free_space: Option<i64>,
 }
 
 /// Detalle de un disco para el panel de info (sección 11): fecha del último
@@ -72,6 +77,9 @@ pub struct DiskDetail {
     pub live_total: Option<i64>,
     /// Espacio libre real del volumen montado ahora (solo si está online).
     pub live_free: Option<i64>,
+    /// Espacio libre del último estado conocido (guardado en la base). Sirve para
+    /// mostrar el uso con el disco desconectado.
+    pub stored_free: Option<i64>,
 }
 
 fn now_ms() -> u128 {
@@ -2111,16 +2119,21 @@ pub fn refresh_online_status(state: tauri::State<'_, AppState>) -> Result<Vec<Di
         .execute("UPDATE disks SET is_online = 0, mount_path = NULL", [])
         .map_err(|e| e.to_string())?;
     for v in &vols {
+        // De paso, guardar el último estado de espacio conocido: capacidad y
+        // libre del volumen montado ahora. Queda en la base para mostrarlo
+        // después aunque el disco se desconecte, sin re-medir.
+        let free = v.available_space as i64;
+        let cap = v.total_space as i64;
         // Por fingerprint si está, si no por nombre del volumen.
         if let Some(fp) = &v.fingerprint {
             let _ = cat.conn.execute(
-                "UPDATE disks SET is_online = 1, mount_path = ?1 WHERE volume_uuid = ?2",
-                rusqlite::params![v.mount_path, fp],
+                "UPDATE disks SET is_online = 1, mount_path = ?1, free_space = ?2, capacity = ?3 WHERE volume_uuid = ?4",
+                rusqlite::params![v.mount_path, free, cap, fp],
             );
         }
         let _ = cat.conn.execute(
-            "UPDATE disks SET is_online = 1, mount_path = ?1 WHERE volume_uuid IS NULL AND name = ?2",
-            rusqlite::params![v.mount_path, v.name],
+            "UPDATE disks SET is_online = 1, mount_path = ?1, free_space = ?2, capacity = ?3 WHERE volume_uuid IS NULL AND name = ?4",
+            rusqlite::params![v.mount_path, free, cap, v.name],
         );
     }
     drop(guard);
@@ -2135,7 +2148,7 @@ pub fn list_disks(state: tauri::State<'_, AppState>) -> Result<Vec<DiskRow>, Str
     let mut stmt = cat
         .conn
         .prepare(
-            "SELECT id, name, total_size, file_count, folder_count, is_online, location, category, comment \
+            "SELECT id, name, total_size, file_count, folder_count, is_online, location, category, comment, capacity, free_space \
              FROM disks ORDER BY name",
         )
         .map_err(|e| e.to_string())?;
@@ -2151,6 +2164,8 @@ pub fn list_disks(state: tauri::State<'_, AppState>) -> Result<Vec<DiskRow>, Str
                 location: r.get(6)?,
                 category: r.get(7)?,
                 comment: r.get(8)?,
+                capacity: r.get(9)?,
+                free_space: r.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -2175,10 +2190,11 @@ pub fn disk_detail(state: tauri::State<'_, AppState>, disk_id: i64) -> Result<Di
         scanned_at,
         volume_uuid,
         mount_path,
+        stored_free,
     ) = cat
         .conn
         .query_row(
-            "SELECT id, name, total_size, file_count, folder_count, is_online, kind, capacity, scanned_at, volume_uuid, mount_path \
+            "SELECT id, name, total_size, file_count, folder_count, is_online, kind, capacity, scanned_at, volume_uuid, mount_path, free_space \
              FROM disks WHERE id = ?1",
             rusqlite::params![disk_id],
             |r| {
@@ -2194,6 +2210,7 @@ pub fn disk_detail(state: tauri::State<'_, AppState>, disk_id: i64) -> Result<Di
                     r.get::<_, Option<i64>>(8)?,
                     r.get::<_, Option<String>>(9)?,
                     r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<i64>>(11)?,
                 ))
             },
         )
@@ -2230,6 +2247,7 @@ pub fn disk_detail(state: tauri::State<'_, AppState>, disk_id: i64) -> Result<Di
         scanned_at,
         live_total,
         live_free,
+        stored_free,
     })
 }
 

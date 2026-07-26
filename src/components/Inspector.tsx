@@ -555,10 +555,10 @@ function DiskPanel({ diskId }: { diskId: number }) {
   }
 
   const total = d.live_total ?? d.capacity ?? null;
-  const free = d.live_free ?? (d.capacity != null ? Math.max(0, d.capacity - d.total_size) : null);
+  const free = d.live_free ?? d.stored_free ?? (d.capacity != null ? Math.max(0, d.capacity - d.total_size) : null);
   const used = total != null && free != null ? total - free : d.total_size;
   const pct = total && total > 0 ? Math.min(100, Math.round((used / total) * 100)) : null;
-  const liveFree = d.live_free != null; // libre medido en vivo vs estimado
+  const measuredFree = d.live_free != null || d.stored_free != null; // medido (vivo o guardado) vs estimado
 
   return (
     <div className="flex h-full flex-col overflow-auto p-4">
@@ -584,7 +584,7 @@ function DiskPanel({ diskId }: { diskId: number }) {
               free: free != null ? formatBytes(free) : "—",
               total: formatBytes(total),
             })}
-            {!liveFree && free != null && (
+            {!measuredFree && free != null && (
               <span className="text-neutral-600"> · {t("disk.estimated")}</span>
             )}
           </p>

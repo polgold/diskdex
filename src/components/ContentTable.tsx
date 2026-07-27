@@ -5,6 +5,7 @@ import {
   ChevronUp,
   ChevronDown,
   Folder,
+  HardDrive,
   File as FileIcon,
   Search,
   Loader2,
@@ -437,11 +438,21 @@ function ResizableHeaderRow({
 }
 
 function Breadcrumb() {
+  const t = useT();
   const breadcrumb = useCatalog((s) => s.breadcrumb);
   const navigateToCrumb = useCatalog((s) => s.navigateToCrumb);
+  const showAllDisks = useCatalog((s) => s.showAllDisks);
   if (breadcrumb.length === 0) return null;
   return (
     <div className="flex flex-wrap items-center gap-0.5 border-b border-neutral-800 px-3 py-1.5 text-xs text-neutral-400">
+      {/* Nivel raíz: siempre presente, para volver a la lista de todos los discos. */}
+      <button
+        onClick={showAllDisks}
+        className="flex items-center gap-1 rounded px-1 py-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+      >
+        <HardDrive className="h-3 w-3" /> {t("disk.allDisks")}
+      </button>
+      <ChevronRight className="mx-0.5 h-3 w-3 text-neutral-600" />
       {breadcrumb.map((c, i) => (
         <span key={`${c.id}-${i}`} className="flex items-center">
           {i > 0 && <ChevronRight className="mx-0.5 h-3 w-3 text-neutral-600" />}

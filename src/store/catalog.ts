@@ -80,6 +80,8 @@ interface CatalogState {
   setLoading: (b: boolean) => void;
 
   openDisk: (disk: DiskRow) => Promise<void>;
+  /** Vuelve a la vista de todos los discos (deselecciona el disco actual). */
+  showAllDisks: () => void;
   openFolder: (entry: EntryRow) => Promise<void>;
   gotoFolder: (diskId: number, parentId: number | null, breadcrumb: Crumb[]) => Promise<void>;
   /** Salta a una carpeta (o a la carpeta que contiene un archivo) desde cualquier
@@ -231,6 +233,8 @@ export const useCatalog = create<CatalogState>((set, get) => ({
 
   setError: (error) => set({ error }),
   setLoading: (loading) => set({ loading }),
+
+  showAllDisks: () => set({ ...RESET_NAV }),
 
   openDisk: async (disk) => {
     const token = ++navToken;

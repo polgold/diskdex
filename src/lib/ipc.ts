@@ -42,6 +42,11 @@ export interface TrashSummary {
   failed: TrashFailure[];
 }
 
+export interface ReportApply {
+  updated: string[];
+  unmatched: string[];
+}
+
 export interface DiskDetail {
   id: number;
   name: string;
@@ -403,6 +408,8 @@ export const api = {
   cancelScan: (mountPath: string) => invoke<void>("cancel_scan", { mountPath }),
   startVolumeWatch: () => invoke<void>("start_volume_watch"),
   refreshOnlineStatus: () => invoke<DiskRow[]>("refresh_online_status"),
+  /** Actualiza free/capacity/kind de los discos desde el reporte de texto de DiskCatalogMaker. */
+  applyDiskReport: (text: string) => invoke<ReportApply>("apply_disk_report", { text }),
 
   // M9 — conector remoto seguro
   agentStart: (bind?: string, scopes?: string) => invoke<AgentStatus>("agent_start", { bind, scopes }),

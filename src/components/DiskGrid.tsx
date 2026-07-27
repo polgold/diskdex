@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
-import { HardDrive, ChevronUp, ChevronDown, Circle } from "lucide-react";
+import { HardDrive, ChevronUp, ChevronDown, Circle, ClipboardPaste } from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import type { DiskRow } from "../lib/ipc";
 import { formatBytes, formatCount, formatDate } from "../lib/format";
 import { useT } from "../lib/i18n";
+import { DiskReportDialog } from "./DiskReportDialog";
 
 /** Columnas ordenables de la tabla de discos. */
 type SortKey = "name" | "size" | "free" | "kind" | "scanned" | "count" | "capacity";
@@ -35,6 +36,7 @@ export function DiskGrid() {
   const disks = useCatalog((s) => s.disks);
   const openDisk = useCatalog((s) => s.openDisk);
   const [sort, setSort] = useState<Sort>({ key: "free", dir: "desc" });
+  const [reportOpen, setReportOpen] = useState(false);
 
   const sorted = useMemo(() => {
     const rows = [...disks];
@@ -73,6 +75,17 @@ export function DiskGrid() {
 
   return (
     <div className="flex h-full flex-col">
+      {reportOpen && <DiskReportDialog onClose={() => setReportOpen(false)} />}
+      <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
+        <span className="text-xs font-medium text-neutral-300">{t("disk.allDisks")}</span>
+        <button
+          onClick={() => setReportOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800"
+          title={t("report.title")}
+        >
+          <ClipboardPaste className="h-3 w-3" /> {t("report.button")}
+        </button>
+      </div>
       <div className="flex-1 overflow-auto">
         <table className="w-full border-collapse text-xs">
           <thead className="sticky top-0 z-10 bg-neutral-900 text-neutral-400">

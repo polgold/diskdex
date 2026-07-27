@@ -13,6 +13,7 @@ pub mod archive;
 mod commands;
 pub mod db;
 pub mod dcmf;
+pub mod disk_report;
 pub mod geo;
 pub mod scan;
 pub mod video;
@@ -114,6 +115,7 @@ pub fn run() {
             commands::list_tags,
             commands::set_entry_comment,
             commands::set_disk_meta,
+            commands::apply_disk_report,
             commands::delete_disk,
             commands::catalog_stats,
             commands::find_duplicates,

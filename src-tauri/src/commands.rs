@@ -55,6 +55,10 @@ pub struct DiskRow {
     /// Espacio libre del último estado conocido. Permite mostrar ocupado/libre
     /// en la lista de discos sin tenerlos conectados ni una consulta por disco.
     pub free_space: Option<i64>,
+    /// Tipo de disco ("USB HD", "SSD", "internal disk", …), si se detectó.
+    pub kind: Option<String>,
+    /// Unix (segundos) del último escaneo de este disco.
+    pub scanned_at: Option<i64>,
 }
 
 /// Detalle de un disco para el panel de info (sección 11): fecha del último
@@ -2148,7 +2152,7 @@ pub fn list_disks(state: tauri::State<'_, AppState>) -> Result<Vec<DiskRow>, Str
     let mut stmt = cat
         .conn
         .prepare(
-            "SELECT id, name, total_size, file_count, folder_count, is_online, location, category, comment, capacity, free_space \
+            "SELECT id, name, total_size, file_count, folder_count, is_online, location, category, comment, capacity, free_space, kind, scanned_at \
              FROM disks ORDER BY name",
         )
         .map_err(|e| e.to_string())?;
@@ -2166,6 +2170,8 @@ pub fn list_disks(state: tauri::State<'_, AppState>) -> Result<Vec<DiskRow>, Str
                 comment: r.get(8)?,
                 capacity: r.get(9)?,
                 free_space: r.get(10)?,
+                kind: r.get(11)?,
+                scanned_at: r.get(12)?,
             })
         })
         .map_err(|e| e.to_string())?;

@@ -25,6 +25,10 @@ export interface DiskRow {
   capacity: number | null;
   /** Espacio libre del último estado conocido. */
   free_space: number | null;
+  /** Tipo de disco ("USB HD", "SSD", "internal disk"…). */
+  kind: string | null;
+  /** Unix (segundos) del último escaneo. */
+  scanned_at: number | null;
 }
 
 export interface TrashFailure {

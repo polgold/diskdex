@@ -5,7 +5,6 @@ use crate::agent::{self, AgentConfig};
 use crate::archive;
 use crate::db;
 use crate::dcmf;
-use crate::disk_report;
 use crate::scan::{self, ScanOptions, VolumeInfo};
 use crate::video;
 use rusqlite::Connection;
@@ -674,23 +673,6 @@ pub fn set_entry_comment(
     let guard = state.catalog.lock().unwrap();
     let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
     db::set_entry_comment(&cat.conn, entry_id, comment.as_deref()).map_err(|e| e.to_string())
-}
-
-/// Actualiza free/capacity/kind de los discos desde un reporte de texto de
-/// DiskCatalogMaker (pegado por el usuario). Devuelve qué discos se actualizaron
-/// y qué filas no matchearon ningún disco del catálogo.
-#[tauri::command(async)]
-pub fn apply_disk_report(
-    state: tauri::State<'_, AppState>,
-    text: String,
-) -> Result<disk_report::ReportApply, String> {
-    let rows = disk_report::parse_report(&text);
-    if rows.is_empty() {
-        return Err("No se reconoció ninguna fila de disco en el texto pegado.".into());
-    }
-    let guard = state.catalog.lock().unwrap();
-    let cat = guard.as_ref().ok_or("no hay catálogo abierto")?;
-    disk_report::apply_report(&cat.conn, &rows).map_err(|e| e.to_string())
 }
 
 /// M7: edita ubicación / categoría / comentario de un disco.
@@ -2067,6 +2049,16 @@ fn scan_disk_blocking(
         enrichment.as_deref(),
     )
     .map_err(|e| format!("error guardando el escaneo: {e}"))?;
+
+    // Registrar el espacio libre del volumen recién escaneado (está montado, así
+    // que lo medimos ahora). Queda en el catálogo para mostrarse aunque después
+    // el disco se desconecte, sin depender de un refresh posterior de la UI.
+    if let Some(v) = scan::list_volumes().into_iter().find(|v| v.mount_path == mount_path) {
+        let _ = conn.execute(
+            "UPDATE disks SET free_space = ?1 WHERE id = ?2",
+            rusqlite::params![v.available_space as i64, ingest.disk_id],
+        );
+    }
 
     Ok(ScanSummary {
         disk_id: ingest.disk_id,

@@ -1,16 +1,37 @@
 import type { Dictionary } from "@/i18n/dictionaries";
 import { site } from "@/lib/site";
+import { getRelease } from "@/lib/releases";
 import { Reveal } from "@/components/Reveal";
 import { ButtonLink } from "@/components/Button";
 import { IconApple, IconWindows, IconGithub } from "@/components/Icons";
 
-export function Download({ dict }: { dict: Dictionary }) {
+export async function Download({ dict }: { dict: Dictionary }) {
   const { download } = dict;
-  const { mac, win } = site.downloads;
+  // Versión y assets del último release publicado en GitHub (ver lib/releases.ts).
+  const release = await getRelease();
 
   const platforms = [
-    { key: "mac", ...mac, Icon: IconApple, label: download.mac, meta: download.macMeta },
-    { key: "win", ...win, Icon: IconWindows, label: download.win, meta: download.winMeta },
+    {
+      key: "macArm",
+      ...release.macArm,
+      Icon: IconApple,
+      label: download.macArm,
+      meta: download.macArmMeta,
+    },
+    {
+      key: "macIntel",
+      ...release.macIntel,
+      Icon: IconApple,
+      label: download.macIntel,
+      meta: download.macIntelMeta,
+    },
+    {
+      key: "win",
+      ...release.win,
+      Icon: IconWindows,
+      label: download.win,
+      meta: download.winMeta,
+    },
   ];
   const someSoon = platforms.some((p) => !p.available);
 
@@ -32,13 +53,13 @@ export function Download({ dict }: { dict: Dictionary }) {
             {download.sub}
           </p>
 
-          <div className="relative mx-auto mt-9 flex max-w-xl flex-col gap-3 sm:flex-row sm:justify-center">
+          <div className="relative mx-auto mt-9 flex max-w-3xl flex-col gap-3 sm:flex-row sm:justify-center">
             {platforms.map(({ key, href, available, Icon, label, meta }) => (
               <div key={key} className="flex-1">
                 <ButtonLink
                   href={href}
                   size="lg"
-                  variant={key === "mac" ? "primary" : "outline"}
+                  variant={key === "macArm" ? "primary" : "outline"}
                   className="w-full"
                 >
                   <Icon className="size-[18px]" />
@@ -62,7 +83,11 @@ export function Download({ dict }: { dict: Dictionary }) {
               <IconGithub className="size-[18px]" />
               {download.repo}
             </ButtonLink>
-            <p className="font-mono text-[11px] text-faint">{download.note}</p>
+            {/* La versión que se está ofreciendo, para que se pueda comparar con
+                la que uno ya tiene instalada (la app no tiene auto-updater). */}
+            <p className="font-mono text-[11px] text-faint">
+              {download.version.replace("{v}", release.version)} · {download.note}
+            </p>
           </div>
         </Reveal>
       </div>

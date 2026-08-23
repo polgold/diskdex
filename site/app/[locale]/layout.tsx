@@ -5,6 +5,7 @@ import "../globals.css";
 import { locales, isLocale, type Locale } from "@/i18n/config";
 import { getDictionary } from "@/i18n/dictionaries";
 import { site } from "@/lib/site";
+import { getRelease } from "@/lib/releases";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -80,7 +81,7 @@ export default async function LocaleLayout({
     description: dict.meta.description,
     url: site.url,
     offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-    softwareVersion: site.version,
+    softwareVersion: (await getRelease()).version,
   };
 
   return (

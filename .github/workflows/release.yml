@@ -1,0 +1,125 @@
+name: release
+
+# Publica los instaladores de las tres plataformas al pushear un tag `vX.Y.Z`.
+#
+#   ./scripts/bump-version.sh 0.2.0
+#   git commit -am "chore: v0.2.0" && git tag v0.2.0 && git push --follow-tags
+#
+# Los builds corren en paralelo y suben sus artefactos al MISMO release, que
+# queda en BORRADOR: se revisa y se publica a mano desde la web de GitHub. Un
+# release a medio subir nunca queda visible para quien esté descargando.
+on:
+  push:
+    tags: ["v*"]
+  # Permite re-correr los builds de un tag ya existente sin re-taggear.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag ya existente a rebuildear (ej: v0.2.0)"
+        required: true
+
+permissions:
+  contents: write # crear el release y subirle los assets
+
+jobs:
+  # Falla RÁPIDO y barato si las versiones no coinciden con el tag. Sin esto, el
+  # release sale con assets nombrados con la versión vieja (`DiskDex_0.1.0.dmg`
+  # bajo el tag v0.2.0) después de 20 minutos de compilar en tres runners.
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Las tres versiones tienen que coincidir con el tag
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          want="${tag#v}"
+          pkg=$(node -p "require('./package.json').version")
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          echo "tag=$want  package.json=$pkg  tauri.conf.json=$conf  Cargo.toml=$cargo"
+          for v in "$pkg" "$conf" "$cargo"; do
+            [ "$v" = "$want" ] || {
+              echo "::error::Versión $v ≠ tag $want. Corré ./scripts/bump-version.sh $want"
+              exit 1
+            }
+          done
+
+  build:
+    needs: check-version
+    strategy:
+      # Que un runner caído no cancele a los otros dos: mejor un release con dos
+      # de tres plataformas (y re-correr la que falló) que quedarse sin ninguna.
+      fail-fast: false
+      matrix:
+        include:
+          # macos-13 es el ÚLTIMO runner Intel de GitHub. Si lo retiran, este
+          # build hay que pasarlo a `--target x86_64-apple-darwin` sobre un
+          # runner ARM (cross nativo dentro de macOS, que sí funciona).
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            label: macOS Intel
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            label: macOS Apple Silicon
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: Windows
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cachea target/ por runner. El primer build es largo (~20 min); los
+      # siguientes bajan mucho.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+
+      # ffmpeg/ffprobe: `externalBin` de tauri.conf.json los exige presentes con
+      # el sufijo del triple, o el bundle falla. No se commitean (pesan ~150 MB).
+      # `shell: bash` es necesario en Windows (si no, PowerShell no lo ejecuta).
+      - name: Sidecars de ffmpeg
+        shell: bash
+        run: ./scripts/fetch-ffmpeg.sh ${{ matrix.target }}
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # El bundler de DMG decora la ventana del Finder por AppleScript, que en
+          # un runner headless se cuelga con `AppleEvent timed out -1712` (es el
+          # mismo error que hacía fallar el build local de v0.1.0). Con CI=true
+          # Tauri saltea ese paso.
+          CI: true
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: DiskDex __VERSION__
+          releaseDraft: true
+          prerelease: false
+          # Cada job sube lo suyo al mismo release; el cuerpo lo escribe el primero
+          # que llegue y los demás no lo pisan.
+          releaseBody: |
+            ## Instalación
+
+            **macOS** — la app no está firmada (firmar requiere cuenta Apple Developer,
+            US$99/año). La primera vez: clic derecho sobre DiskDex → **Abrir**.
+            Bajá el `aarch64` si tu Mac es M1/M2/M3/M4, el `x64` si es Intel.
+
+            **Windows** — el instalador no está firmado: SmartScreen va a avisar.
+            Más información → Ejecutar de todas formas.
+
+            ---
+          args: --target ${{ matrix.target }}

@@ -1,6 +1,6 @@
 [package]
 name = "diskdex"
-version = "0.1.0"
+version = "0.2.0"
 description = "Disk catalog app (DiskCatalogMaker-compatible) with secure remote connector"
 authors = ["polgold"]
 edition = "2021"

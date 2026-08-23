@@ -17,6 +17,10 @@ on:
       tag:
         description: "Tag ya existente a rebuildear (ej: v0.2.0)"
         required: true
+      only:
+        description: "Rebuildear SOLO este target (vacío = los tres). Ej: x86_64-apple-darwin"
+        required: false
+        default: ""
 
 permissions:
   contents: write # crear el release y subirle los assets
@@ -52,10 +56,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-13 es el ÚLTIMO runner Intel de GitHub. Si lo retiran, este
-          # build hay que pasarlo a `--target x86_64-apple-darwin` sobre un
-          # runner ARM (cross nativo dentro de macOS, que sí funciona).
-          - runner: macos-13
+          # Intel se compila CRUZADO desde un runner ARM. `macos-13` era el
+          # último runner Intel de GitHub y en la práctica ya no se asigna: el
+          # job del release v0.2.0 estuvo 3 h en cola sin que nadie lo tomara.
+          # Xcode en Apple Silicon produce binarios x86_64 sin problema, así que
+          # el único cambio necesario es el runner — el `--target` ya estaba.
+          - runner: macos-14
             target: x86_64-apple-darwin
             label: macOS Intel
           - runner: macos-14
@@ -66,6 +72,10 @@ jobs:
             label: Windows
     runs-on: ${{ matrix.runner }}
     name: ${{ matrix.label }}
+    # Permite rebuildear una sola plataforma sin repetir las otras dos y sin
+    # re-subir assets que ya están bien. En un push de tag `only` viene vacío y
+    # corren las tres.
+    if: ${{ github.event.inputs.only == '' || github.event.inputs.only == matrix.target }}
     steps:
       - uses: actions/checkout@v4
         with:

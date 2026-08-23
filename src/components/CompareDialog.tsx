@@ -23,6 +23,7 @@ import {
   type DiffEntry,
   type EntryRow,
   type MissingNode,
+  type CopySummary,
 } from "../lib/ipc";
 import { formatBytes, formatCount } from "../lib/format";
 import { useT } from "../lib/i18n";
@@ -241,6 +242,8 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
   const progress = useCopy((s) => s.progress);
   const startCopy = useCopy((s) => s.start);
   const cancelCopy = useCopy((s) => s.cancel);
+  const copyError = useCopy((s) => s.error);
+  const clearCopySummary = useCopy((s) => s.clearSummary);
   const copying = copyRunning !== null;
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -429,6 +432,14 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
         {comparing ? t("compare.comparing") : t("compare.run")}
       </button>
 
+      {/* Resultado de la última copia. El backend ya venía contando fallos y
+          guardando hasta 50 mensajes de error, pero no se mostraban en ningún
+          lado: una copia que fallaba en cientos de archivos se veía igual que una
+          que terminó bien, solo que "más rápido". */}
+      {!copying && (lastSummary || copyError) && (
+        <CopyReport summary={lastSummary} error={copyError} onDismiss={clearCopySummary} />
+      )}
+
       {/* Zona de copia: va ARRIBA de las listas. Con miles de diferencias, dejarla
           al final la escondía debajo de un scroll larguísimo y no se entendía por
           qué no se podía copiar. La acción y su motivo de bloqueo van juntos. */}
@@ -595,5 +606,137 @@ export function CompareDialog({ onClose }: { onClose: () => void }) {
       {result && <p className="mt-3 text-xs text-emerald-300">{result}</p>}
       {error && <p className="mt-3 whitespace-pre-wrap text-xs text-red-400">{error}</p>}
     </Modal>
+  );
+}
+
+/** Resultado de la última copia: qué se escribió, qué se salteó y —sobre todo—
+ *  qué falló y por qué. Los mensajes vienen del backend (hasta 50) y hasta ahora
+ *  se descartaban: el único aviso era una notificación del sistema con el conteo,
+ *  que se pierde si la app está en primer plano. Sin la lista de errores, una
+ *  copia cortada por un destino ilegible era indistinguible de una exitosa. */
+function CopyReport({
+  summary,
+  error,
+  onDismiss,
+}: {
+  summary: (CopySummary & { label: string }) | null;
+  error: string | null;
+  onDismiss: () => void;
+}) {
+  const t = useT();
+  const [openErrors, setOpenErrors] = useState(false);
+
+  // La copia ni siquiera arrancó (disco offline, origen == destino…).
+  if (!summary) {
+    return (
+      <div className="mb-4 flex items-start gap-2 rounded-lg border border-red-900/60 bg-red-950/25 p-3 text-xs text-red-300">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{error}</span>
+        <DismissButton onClick={onDismiss} label={t("common.close")} />
+      </div>
+    );
+  }
+
+  const failed = summary.failed > 0;
+  const tone = failed
+    ? "border-red-900/60 bg-red-950/25"
+    : summary.cancelled
+      ? "border-amber-900/60 bg-amber-950/25"
+      : "border-emerald-900/60 bg-emerald-950/25";
+
+  return (
+    <div className={`mb-4 space-y-2 rounded-lg border p-3 ${tone}`}>
+      <div className="flex items-start gap-2">
+        {failed ? (
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+        ) : summary.cancelled ? (
+          <X className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+        ) : (
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-neutral-200">
+            {failed
+              ? t("copyReport.withErrors")
+              : summary.cancelled
+                ? t("copyReport.cancelled")
+                : t("copyReport.done")}
+          </p>
+          <p className="truncate text-[11px] text-neutral-500" title={summary.label}>
+            {summary.label}
+          </p>
+        </div>
+        <DismissButton onClick={onDismiss} label={t("common.close")} />
+      </div>
+
+      {/* Números en una línea. `skipped` y `failed` solo aparecen si no son cero:
+          mostrar "0 fallidos" en cada copia normal entrena a no leer el cartel. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] tabular-nums">
+        <span className="text-emerald-300">
+          {t("copyReport.copied", { n: formatCount(summary.copied), bytes: formatBytes(summary.bytes_copied) })}
+        </span>
+        {summary.verified > 0 && (
+          <span className="text-neutral-400">
+            {t("copyReport.verified", { n: formatCount(summary.verified) })}
+          </span>
+        )}
+        {summary.skipped > 0 && (
+          <span className="text-neutral-400" title={t("copyReport.skippedTip")}>
+            {t("copyReport.skipped", { n: formatCount(summary.skipped) })}
+          </span>
+        )}
+        {failed && (
+          <span className="font-medium text-red-300">
+            {t("copyReport.failed", { n: formatCount(summary.failed) })}
+          </span>
+        )}
+      </div>
+
+      {summary.errors.length > 0 && (
+        <div>
+          <button
+            onClick={() => setOpenErrors((v) => !v)}
+            className="inline-flex items-center gap-1 text-[11px] text-red-300 hover:text-red-200"
+          >
+            <ChevronRight className={`h-3 w-3 transition-transform ${openErrors ? "rotate-90" : ""}`} />
+            {openErrors ? t("copyReport.hideErrors") : t("copyReport.showErrors", { n: summary.errors.length })}
+          </button>
+          {openErrors && (
+            <>
+              <ul className="mt-1 max-h-48 overflow-auto rounded border border-red-900/40 bg-neutral-950/60 p-2 font-mono text-[10px] leading-relaxed text-red-200">
+                {summary.errors.map((e, i) => (
+                  <li key={i} className="break-words">
+                    {e}
+                  </li>
+                ))}
+              </ul>
+              {/* El backend corta en 50: decirlo, en vez de dejar creer que esos
+                  son todos los errores que hubo. */}
+              {summary.failed > summary.errors.length && (
+                <p className="mt-1 text-[10px] text-neutral-500">
+                  {t("copyReport.errorsTruncated", {
+                    shown: summary.errors.length,
+                    total: formatCount(summary.failed),
+                  })}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DismissButton({ onClick, label }: { onClick: () => void; label: string }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="shrink-0 rounded p-0.5 text-neutral-500 transition-colors hover:text-neutral-200"
+    >
+      <X className="h-3.5 w-3.5" />
+    </button>
   );
 }

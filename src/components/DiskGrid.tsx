@@ -6,7 +6,7 @@ import { formatBytes, formatCount, formatDate } from "../lib/format";
 import { useT } from "../lib/i18n";
 
 /** Columnas ordenables de la tabla de discos. */
-type SortKey = "name" | "size" | "free" | "kind" | "scanned" | "count" | "capacity";
+type SortKey = "online" | "name" | "size" | "free" | "kind" | "scanned" | "count" | "capacity";
 interface Sort {
   key: SortKey;
   dir: "asc" | "desc";
@@ -15,6 +15,7 @@ interface Sort {
 /** Valor comparable de cada columna (null va siempre al final). */
 function sortValue(d: DiskRow, key: SortKey): number | string | null {
   switch (key) {
+    case "online": return d.is_online ? 1 : 0;
     case "name": return d.name.toLowerCase();
     case "size": return d.total_size;
     case "free": return d.free_space;
@@ -34,11 +35,20 @@ export function DiskGrid() {
   const t = useT();
   const disks = useCatalog((s) => s.disks);
   const openDisk = useCatalog((s) => s.openDisk);
+  const onlineFirst = useCatalog((s) => s.onlineFirst);
+  const setOnlineFirst = useCatalog((s) => s.setOnlineFirst);
   const [sort, setSort] = useState<Sort>({ key: "free", dir: "desc" });
 
   const sorted = useMemo(() => {
     const rows = [...disks];
     rows.sort((a, b) => {
+      // "Conectados primero" es un AGRUPADOR, no una columna: manda sobre el
+      // orden elegido en vez de reemplazarlo, para que dentro de cada grupo se
+      // siga viendo lo que se pidió (por libre, por fecha de escaneo, etc.).
+      // Con la columna ● activa no se aplica dos veces.
+      if (onlineFirst && sort.key !== "online" && a.is_online !== b.is_online) {
+        return a.is_online ? -1 : 1;
+      }
       const va = sortValue(a, sort.key);
       const vb = sortValue(b, sort.key);
       // Los nulos (dato desconocido) siempre al fondo, sin importar la dirección.
@@ -46,10 +56,15 @@ export function DiskGrid() {
       if (va == null) return 1;
       if (vb == null) return -1;
       const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
+      // Desempate por nombre: sin esto, ordenar por una columna con muchos
+      // empates (tipo, o discos sin fecha) barajaba las filas en cada render.
+      if (cmp === 0) return a.name.localeCompare(b.name);
       return sort.dir === "asc" ? cmp : -cmp;
     });
     return rows;
-  }, [disks, sort]);
+  }, [disks, sort, onlineFirst]);
+
+  const onlineCount = useMemo(() => disks.filter((d) => d.is_online).length, [disks]);
 
   const totals = useMemo(
     () => disks.reduce((n, d) => n + d.file_count + d.folder_count, 0),
@@ -77,6 +92,7 @@ export function DiskGrid() {
         <table className="w-full border-collapse text-xs">
           <thead className="sticky top-0 z-10 bg-neutral-900 text-neutral-400">
             <tr className="border-b border-border">
+              <Th label="●" col="online" sort={sort} onSort={toggle} title={t("disk.colOnlineTip")} />
               <Th label={t("table.colName")} col="name" sort={sort} onSort={toggle} />
               <Th label={t("disk.colSize")} col="size" sort={sort} onSort={toggle} align="right" />
               <Th label={t("disk.colFree")} col="free" sort={sort} onSort={toggle} align="right" />
@@ -93,13 +109,18 @@ export function DiskGrid() {
                 onClick={() => openDisk(d)}
                 className="cursor-pointer border-b border-neutral-800/50 hover:bg-neutral-800/40"
               >
+                <td className="pl-3 pr-1 py-1.5">
+                  <Circle
+                    className={`h-1.5 w-1.5 shrink-0 ${d.is_online ? "fill-emerald-500 text-emerald-500" : "fill-neutral-600 text-neutral-600"}`}
+                    aria-label={d.is_online ? t("common.online") : t("common.offline")}
+                  />
+                </td>
                 <td className="px-3 py-1.5">
                   <span className="flex items-center gap-2">
-                    <Circle
-                      className={`h-1.5 w-1.5 shrink-0 ${d.is_online ? "fill-emerald-500 text-emerald-500" : "fill-neutral-600 text-neutral-600"}`}
-                    />
                     <HardDrive className="h-3.5 w-3.5 shrink-0 text-amber-500/80" />
-                    <span className="truncate text-neutral-200" title={d.name}>{d.name}</span>
+                    <span className={`truncate ${d.is_online ? "text-neutral-200" : "text-neutral-400"}`} title={d.name}>
+                      {d.name}
+                    </span>
                   </span>
                 </td>
                 <td className="px-3 py-1.5 text-right tabular-nums text-neutral-300">{formatBytes(d.total_size)}</td>
@@ -121,9 +142,23 @@ export function DiskGrid() {
           </tbody>
         </table>
       </div>
-      {/* Totales, como el pie de DiskCatalogMaker. */}
-      <div className="border-t border-border bg-neutral-900/60 px-3 py-1.5 text-center text-[11px] text-neutral-500">
-        {t("disk.footer", { disks: formatCount(disks.length), items: formatCount(totals) })}
+      {/* Totales, como el pie de DiskCatalogMaker, + el agrupador de conectados. */}
+      <div className="flex items-center gap-3 border-t border-border bg-neutral-900/60 px-3 py-1.5 text-[11px] text-neutral-500">
+        <label
+          className="inline-flex cursor-pointer items-center gap-1.5 hover:text-neutral-300"
+          title={t("disk.onlineFirstTip")}
+        >
+          <input
+            type="checkbox"
+            checked={onlineFirst}
+            onChange={(e) => setOnlineFirst(e.target.checked)}
+            className="h-3 w-3 accent-emerald-500"
+          />
+          {t("disk.onlineFirst", { n: formatCount(onlineCount) })}
+        </label>
+        <span className="mx-auto">
+          {t("disk.footer", { disks: formatCount(disks.length), items: formatCount(totals) })}
+        </span>
       </div>
     </div>
   );
@@ -135,17 +170,20 @@ function Th({
   sort,
   onSort,
   align,
+  title,
 }: {
   label: string;
   col: SortKey;
   sort: Sort;
   onSort: (k: SortKey) => void;
   align?: "right";
+  title?: string;
 }) {
   const active = sort.key === col;
   return (
     <th
       onClick={() => onSort(col)}
+      title={title}
       className={`cursor-pointer select-none whitespace-nowrap px-3 py-1.5 font-medium hover:text-neutral-200 ${
         align === "right" ? "text-right" : "text-left"
       }`}

@@ -204,6 +204,36 @@ export function parseQuery(input: string): SearchFilters {
   return f;
 }
 
+// ── Tokens desde los chips de la barra de herramientas ────────────────────────
+// Los chips escriben sobre el MISMO texto que el buscador, no sobre una consulta
+// aparte. Así se combinan con lo que ya escribiste ("techo" + Carpetas) en vez de
+// reemplazarlo, y el input siempre muestra el filtro que está activo.
+
+/** Token de tipo que usa el chip "Carpetas". `parseQuery` lo lee como kind=folder. */
+export const FOLDER_TOKEN = "type:carpeta";
+/** Chips de categoría (`cat:video`) y de tipo (`type:carpeta`) se contradicen:
+ *  una carpeta no tiene extensión, así que juntos no devuelven nada. Activar uno
+ *  saca al otro. */
+export const CATEGORY_TOKEN_RX = /^(?:cat|categoria|categoría):/i;
+export const TYPE_TOKEN_RX = /^(?:type|kind):/i;
+
+/** ¿El texto de búsqueda contiene exactamente este token? */
+export function hasToken(query: string, token: string): boolean {
+  const want = token.toLowerCase();
+  return query.split(/\s+/).some((p) => p.toLowerCase() === want);
+}
+
+/** Agrega o saca `token` del texto, dejando el resto intacto. Al agregarlo,
+ *  elimina los tokens que matcheen `conflicts` (filtros mutuamente excluyentes). */
+export function toggleToken(query: string, token: string, conflicts: RegExp[] = []): string {
+  const want = token.toLowerCase();
+  const parts = query.split(/\s+/).filter(Boolean);
+  const had = parts.some((p) => p.toLowerCase() === want);
+  const rest = parts.filter((p) => p.toLowerCase() !== want);
+  if (had) return rest.join(" ");
+  return [...rest.filter((p) => !conflicts.some((rx) => rx.test(p))), token].join(" ");
+}
+
 /** ¿El query tiene algún criterio (texto o filtro)? */
 export function hasCriteria(f: SearchFilters): boolean {
   return (

@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   HelpCircle,
   Sparkles,
+  Target,
 } from "lucide-react";
 import { DiskGrid } from "./DiskGrid";
 import { useCatalog } from "../store/catalog";
@@ -106,7 +107,9 @@ function compareEntries(a: EntryRow, b: EntryRow, sort: SortState): number {
   }
 }
 
-/** Comparador de resultados de búsqueda. */
+/** Comparador de resultados de búsqueda. Ojo: "relevance" NO se resuelve acá —
+ *  es el orden en que vinieron del backend, que no se puede recalcular fila a
+ *  fila. Lo maneja el memo de `SearchTable` salteando el sort. */
 function compareSearch(a: SearchItem, b: SearchItem, sort: SortState): number {
   const dir = sort.dir === "asc" ? 1 : -1;
   switch (sort.key) {
@@ -701,10 +704,20 @@ function SearchTable() {
     size: 96,
     path: 360,
   });
-  const { sort, toggle } = useSort("diskdex:sort:search", { key: "name", dir: "asc" });
+  // Clave :v2 a propósito. La v1 guardaba el orden por columna y bastaba con
+  // haber tocado una vez la cabecera "Disco" para que TODA búsqueda posterior
+  // saliera agrupada por disco — el resultado parecía un listado de discos y lo
+  // que uno había ido a buscar quedaba enterrado. Cambiar la clave devuelve a
+  // todo el mundo al orden por relevancia.
+  const { sort, toggle } = useSort("diskdex:sort:search:v2", { key: "relevance", dir: "asc" });
 
   const items = useMemo(
-    () => [...rawItems].sort((a, b) => compareSearch(a, b, sort)),
+    () =>
+      // Relevancia = el orden que ya calculó el backend (acierto exacto primero,
+      // después prefijo, después el resto). Reordenarlo acá lo destruiría.
+      sort.key === "relevance"
+        ? rawItems
+        : [...rawItems].sort((a, b) => compareSearch(a, b, sort)),
     [rawItems, sort]
   );
 
@@ -771,6 +784,25 @@ function SearchTable() {
             )}
           </span>
         ) : null}
+        {/* Volver al orden por relevancia. Sin esto, ordenar por una columna era
+            un viaje de ida: la cabecera solo alterna asc/desc y el orden queda
+            guardado para las búsquedas siguientes. */}
+        {result && items.length > 0 && (
+          <button
+            // Ya activo = no hacer nada: `toggle` sobre la misma clave solo
+            // invertiría una dirección que la relevancia no usa.
+            onClick={() => sort.key !== "relevance" && toggle("relevance")}
+            title={t("table.sortRelevanceTip")}
+            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
+              sort.key === "relevance"
+                ? "border-primary/40 bg-primary/15 text-primary"
+                : "border-border text-neutral-500 hover:bg-accent/60 hover:text-neutral-300"
+            }`}
+          >
+            <Target className="h-3 w-3" />
+            {t("table.sortRelevance")}
+          </button>
+        )}
         <FilterChips />
       </div>
       {viewMode === "grid" ? (

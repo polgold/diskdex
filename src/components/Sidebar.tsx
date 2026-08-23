@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, Folder, HardDrive, ScanLine, Trash2 } from "lucide-react";
 import { api, type EntryRow, type VolumeInfo, type DiskRow } from "../lib/ipc";
 import { useCatalog, type Crumb } from "../store/catalog";
@@ -22,9 +22,19 @@ function diskScanStatus(disk: DiskRow, volumes: VolumeInfo[]): DiskStatus {
 export function Sidebar({ onRescan }: { onRescan?: (mount: string, name: string) => void }) {
   const t = useT();
   const disks = useCatalog((s) => s.disks);
+  const onlineFirst = useCatalog((s) => s.onlineFirst);
   const selectedDiskId = useCatalog((s) => s.selectedDiskId);
   const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
   const [menu, setMenu] = useState<{ x: number; y: number; disk: DiskRow } | null>(null);
+
+  // Mismo criterio que la tabla de discos (preferencia compartida): lo conectado
+  // arriba. El backend los devuelve por nombre; acá solo se reagrupa.
+  const ordered = useMemo(() => {
+    if (!onlineFirst) return disks;
+    return [...disks].sort(
+      (a, b) => Number(b.is_online) - Number(a.is_online) || a.name.localeCompare(b.name),
+    );
+  }, [disks, onlineFirst]);
 
   // Volúmenes montados ahora, para comparar tamaño usado vs. lo catalogado.
   // Se refresca cuando cambia la lista de discos (p.ej. tras un escaneo).
@@ -44,7 +54,7 @@ export function Sidebar({ onRescan }: { onRescan?: (mount: string, name: string)
 
   return (
     <nav className="select-none py-1 text-sm">
-      {disks.map((d) => (
+      {ordered.map((d) => (
         <TreeNode
           key={d.id}
           diskId={d.id}

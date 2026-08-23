@@ -139,6 +139,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     // ── ContentTable: resultados de búsqueda ──
     "table.results": "{n} resultados",
     "table.firstN": "(primeros {n})",
+    "table.sortRelevance": "Relevancia",
+    "table.sortRelevanceTip":
+      "Lo que más se parece a lo que buscaste, primero: nombre exacto, después los que empiezan igual, después el resto.",
     "table.noResults": "sin resultados",
 
     // ── ContentTable: chips de filtro ──
@@ -158,6 +161,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.category_audio": "Audio",
     "toolbar.category_documento": "Documentos",
     "toolbar.category_comprimido": "Comprimidos",
+    "toolbar.category_carpeta": "Carpetas",
+    "toolbar.categoryFolderTip":
+      "Buscar solo carpetas. Se combina con lo que escribas: \"techo\" + Carpetas busca la carpeta TECHO.",
     "toolbar.typeFolder": "carpeta",
     "toolbar.typeFile": "archivo",
     "toolbar.exportNameSearch": "busqueda",
@@ -349,6 +355,10 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "disk.colCapacity": "Capacidad",
     "disk.itemsCount": "{n} ítems",
     "disk.footer": "{disks} discos · {items} ítems en total",
+    "disk.colOnlineTip": "Ordenar por estado (conectados primero)",
+    "disk.onlineFirst": "Conectados primero ({n})",
+    "disk.onlineFirstTip":
+      "Agrupa arriba los discos conectados, sin cambiar el orden que elegiste en las columnas.",
     "stats.totalSize": "tamaño total",
     "stats.byExtension": "Por extensión (top 25 por tamaño)",
     "stats.biggestFiles": "Archivos más grandes",
@@ -378,6 +388,18 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.sameDisk": "El origen y el destino no pueden ser el mismo disco.",
     "compare.offline": "offline",
     "compare.identical": "El destino ya tiene todo lo del origen. Backup completo ✓",
+    "copyReport.done": "Copia terminada",
+    "copyReport.withErrors": "La copia terminó con errores",
+    "copyReport.cancelled": "Copia cancelada",
+    "copyReport.copied": "{n} copiados · {bytes}",
+    "copyReport.verified": "{n} verificados por hash",
+    "copyReport.skipped": "{n} salteados",
+    "copyReport.skippedTip":
+      "Ya estaban en el destino: el catálogo los daba por faltantes pero en el disco estaban. No se pisó nada.",
+    "copyReport.failed": "{n} fallidos",
+    "copyReport.showErrors": "Ver los {n} errores",
+    "copyReport.hideErrors": "Ocultar los errores",
+    "copyReport.errorsTruncated": "Se muestran los primeros {shown} de {total} errores.",
     "compare.missing": "Faltan en el destino",
     "compare.mismatch": "Contenido distinto",
     "compare.extra": "Sobran en el destino",
@@ -603,6 +625,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     // ── ContentTable: search results ──
     "table.results": "{n} results",
     "table.firstN": "(first {n})",
+    "table.sortRelevance": "Relevance",
+    "table.sortRelevanceTip":
+      "Closest match to what you typed first: exact name, then names starting with it, then the rest.",
     "table.noResults": "no results",
 
     // ── ContentTable: filter chips ──
@@ -622,6 +647,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "toolbar.category_audio": "Audio",
     "toolbar.category_documento": "Documents",
     "toolbar.category_comprimido": "Archives",
+    "toolbar.category_carpeta": "Folders",
+    "toolbar.categoryFolderTip":
+      "Search folders only. Combines with what you type: \"techo\" + Folders finds the TECHO folder.",
     "toolbar.typeFolder": "folder",
     "toolbar.typeFile": "file",
     "toolbar.exportNameSearch": "search",
@@ -813,6 +841,10 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "disk.colCapacity": "Capacity",
     "disk.itemsCount": "{n} items",
     "disk.footer": "{disks} disks · {items} items total",
+    "disk.colOnlineTip": "Sort by status (connected first)",
+    "disk.onlineFirst": "Connected first ({n})",
+    "disk.onlineFirstTip":
+      "Groups connected disks at the top without changing the column sort you picked.",
     "stats.totalSize": "total size",
     "stats.byExtension": "By extension (top 25 by size)",
     "stats.biggestFiles": "Largest files",
@@ -842,6 +874,18 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     "compare.sameDisk": "Source and destination can't be the same disk.",
     "compare.offline": "offline",
     "compare.identical": "The destination already has everything from the source. Backup complete ✓",
+    "copyReport.done": "Copy finished",
+    "copyReport.withErrors": "The copy finished with errors",
+    "copyReport.cancelled": "Copy cancelled",
+    "copyReport.copied": "{n} copied · {bytes}",
+    "copyReport.verified": "{n} hash-verified",
+    "copyReport.skipped": "{n} skipped",
+    "copyReport.skippedTip":
+      "Already at the destination: the catalog listed them as missing but the disk had them. Nothing was overwritten.",
+    "copyReport.failed": "{n} failed",
+    "copyReport.showErrors": "Show the {n} errors",
+    "copyReport.hideErrors": "Hide errors",
+    "copyReport.errorsTruncated": "Showing the first {shown} of {total} errors.",
     "compare.missing": "Missing on destination",
     "compare.mismatch": "Content differs",
     "compare.extra": "Extra on destination",

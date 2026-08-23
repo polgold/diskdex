@@ -1339,6 +1339,21 @@ pub fn get_entry(conn: &Connection, entry_id: i64) -> DbResult<Option<EntryRow>>
 /// Construye una query FTS5 segura a partir de texto libre del usuario:
 /// tokeniza por no-alfanuméricos, entrecomilla cada token y agrega `*` (prefijo)
 /// al último para búsqueda incremental. Devuelve `None` si no hay tokens.
+/// Neutraliza los comodines de LIKE (`%`, `_`) y el propio escape en un texto que
+/// viene del usuario. Sin esto, buscar `C0001_001` haría que el `_` matchee
+/// cualquier carácter y el escalón de relevancia premiaría nombres que no son.
+/// El patrón resultante se usa siempre con `ESCAPE '\'`.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\\' || c == '%' || c == '_' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub fn build_fts_query(q: &str) -> Option<String> {
     let tokens: Vec<&str> = q
         .split(|c: char| !c.is_alphanumeric())
@@ -1853,18 +1868,47 @@ pub fn search_advanced(conn: &Connection, f: &SearchFilters, limit: i64) -> DbRe
         "entries e JOIN disks d ON d.id = e.disk_id"
     };
     let where_sql = format!("WHERE {}", clauses.join(" AND "));
-    let order = if fts.is_some() { "ORDER BY rank" } else { "ORDER BY e.size_logical DESC" };
+
+    // Orden. Con texto, `rank` (bm25) por sí solo no distingue lo que el usuario
+    // fue a buscar: sobre un campo de una sola palabra —el nombre— casi todos los
+    // aciertos puntúan parecido, así que la carpeta "TECHO" queda mezclada entre
+    // cientos de "casita_techo_agapatus". Se escalona antes por qué tan literal
+    // es el acierto y recién ahí se desempata por bm25:
+    //   0 = el nombre ES la consulta            ("TECHO")
+    //   1 = es la consulta + extensión          ("TECHO.mov")
+    //   2 = empieza con la consulta             ("TECHO_FINAL")
+    //   3 = el resto (la palabra aparece adentro)
+    let order = if fts.is_some() {
+        "ORDER BY CASE \
+           WHEN lower(e.name) = ? THEN 0 \
+           WHEN lower(e.name) LIKE ? ESCAPE '\\' THEN 1 \
+           WHEN lower(e.name) LIKE ? ESCAPE '\\' THEN 2 \
+           ELSE 3 END, rank"
+    } else {
+        // Sin texto son filtros puros (tipo/tamaño/fecha): lo más grande primero,
+        // con el nombre como desempate para que el orden sea estable entre corridas.
+        "ORDER BY e.size_logical DESC, e.name"
+    };
 
     // Total.
     let count_sql = format!("SELECT COUNT(*) FROM {from} {where_sql}");
     let total: i64 = conn.query_row(&count_sql, params_from_iter(bind.iter().map(|b| b.as_ref())), |r| r.get(0))?;
 
-    // Items (agrega el LIMIT al final).
+    // Items. Los parámetros del ORDER BY van DESPUÉS de los del WHERE y ANTES del
+    // LIMIT, igual que su posición en el SQL (los `?` se numeran por aparición).
+    // El COUNT de arriba ya corrió con `bind` solo, sin estos.
     let sel_sql = format!(
         "SELECT e.id, e.disk_id, d.name, e.name, e.is_folder, e.size_logical, e.modified_at \
          FROM {from} {where_sql} {order} LIMIT ?"
     );
     let mut sel_bind = bind;
+    if fts.is_some() {
+        let needle = f.text.trim().to_lowercase();
+        let esc = like_escape(&needle);
+        sel_bind.push(Box::new(needle));
+        sel_bind.push(Box::new(format!("{esc}.%")));
+        sel_bind.push(Box::new(format!("{esc}%")));
+    }
     sel_bind.push(Box::new(limit));
 
     let mut stmt = conn.prepare(&sel_sql)?;
@@ -3143,6 +3187,62 @@ mod tests {
         let r = search_advanced(&conn, &f, 100).unwrap();
         assert_eq!(r.total, 1);
         assert_eq!(r.items[0].name, "B-ROLL.MOV");
+    }
+
+    /// Lo que el usuario fue a buscar tiene que salir PRIMERO. bm25 solo no
+    /// alcanza sobre un campo de una palabra: la carpeta que se llama igual que
+    /// la consulta quedaba mezclada entre los nombres que apenas la contienen.
+    #[test]
+    fn advanced_ranks_exact_name_before_partial_matches() {
+        let mut conn = open_in_memory().unwrap();
+        let disk = DcmfDisk {
+            name: "SF39".into(),
+            entries: vec![
+                DcmfEntry { name: "SF39".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                // A propósito en orden alfabético inverso al esperado, y con el
+                // acierto exacto al final: si el orden se respetara "como vino",
+                // el test pasaría por casualidad.
+                DcmfEntry { name: "casita_techo_agapatus".into(), parent: 0, is_folder: true, is_volume: false, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                DcmfEntry { name: "TECHO_FINAL".into(), parent: 0, is_folder: true, is_volume: false, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                DcmfEntry { name: "techo.jpg".into(), parent: 0, is_folder: false, is_volume: false, size_logical: 10, size_physical: 10, created: 0, modified: 0 },
+                DcmfEntry { name: "TECHO".into(), parent: 0, is_folder: true, is_volume: false, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+            ],
+        };
+        ingest_disks(&mut conn, &[disk]).unwrap();
+
+        let f = SearchFilters { text: "techo".into(), ..Default::default() };
+        let r = search_advanced(&conn, &f, 100).unwrap();
+        let names: Vec<&str> = r.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["TECHO", "techo.jpg", "TECHO_FINAL", "casita_techo_agapatus"]);
+    }
+
+    /// El `_` de un nombre como C0001_001 es comodín en LIKE. Sin escaparlo, el
+    /// escalón "empieza con" premiaría nombres que no empiezan con eso.
+    #[test]
+    fn advanced_relevance_escapes_like_wildcards() {
+        let mut conn = open_in_memory().unwrap();
+        let disk = DcmfDisk {
+            name: "SF40".into(),
+            entries: vec![
+                DcmfEntry { name: "SF40".into(), parent: -1, is_folder: true, is_volume: true, size_logical: 0, size_physical: 0, created: 0, modified: 0 },
+                // "C0001X001" solo matchea "C0001_001" si el `_` actúa de comodín.
+                DcmfEntry { name: "C0001X001_take2.mov".into(), parent: 0, is_folder: false, is_volume: false, size_logical: 10, size_physical: 10, created: 0, modified: 0 },
+                DcmfEntry { name: "C0001_001.mov".into(), parent: 0, is_folder: false, is_volume: false, size_logical: 10, size_physical: 10, created: 0, modified: 0 },
+            ],
+        };
+        ingest_disks(&mut conn, &[disk]).unwrap();
+
+        let f = SearchFilters { text: "C0001_001".into(), ..Default::default() };
+        let r = search_advanced(&conn, &f, 100).unwrap();
+        assert_eq!(r.items[0].name, "C0001_001.mov");
+    }
+
+    #[test]
+    fn like_escape_neutralizes_wildcards() {
+        assert_eq!(like_escape("C0001_001"), r"C0001\_001");
+        assert_eq!(like_escape("50%"), r"50\%");
+        assert_eq!(like_escape(r"a\b"), r"a\\b");
+        assert_eq!(like_escape("normal"), "normal");
     }
 
     #[test]

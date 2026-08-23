@@ -14,11 +14,19 @@ import {
   LayoutGrid,
   FolderInput,
   GitCompareArrows,
+  Folder,
 } from "lucide-react";
 import { useCatalog } from "../store/catalog";
 import { useT } from "../lib/i18n";
 import { exportRows, type ExportRow, type ExportFormat } from "../lib/export";
-import { FILE_CATEGORIES } from "../lib/query-parser";
+import {
+  FILE_CATEGORIES,
+  toggleToken,
+  hasToken,
+  FOLDER_TOKEN,
+  CATEGORY_TOKEN_RX,
+  TYPE_TOKEN_RX,
+} from "../lib/query-parser";
 import { StatsDialog } from "./StatsDialog";
 import { DuplicatesDialog } from "./DuplicatesDialog";
 import { GatherDialog } from "./GatherDialog";
@@ -33,25 +41,42 @@ const CATEGORY_ICONS: Record<string, React.ReactNode> = {
   comprimido: <Package className="h-3.5 w-3.5" />,
 };
 
-/** Chips de filtro por tipo de archivo (estilo Dropbox). */
+/** Chips de filtro por tipo (estilo Dropbox). Escriben tokens sobre el MISMO
+ *  texto del buscador, así se combinan con lo que ya escribiste —"techo" +
+ *  Carpetas busca carpetas llamadas techo— en vez de reemplazar la consulta. */
 function CategoryChips() {
   const t = useT();
-  const runSearch = useCatalog((s) => s.runSearch);
-  const clearSearch = useCatalog((s) => s.clearSearch);
-  const searchQuery = useCatalog((s) => s.searchQuery);
+  const query = useCatalog((s) => s.searchInput);
+  const setQuery = useCatalog((s) => s.setSearchInput);
+
+  const chip = (active: boolean) =>
+    `inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors ${
+      active
+        ? "border-primary/40 bg-primary/15 text-primary"
+        : "border-border text-neutral-400 hover:bg-accent/60 hover:text-neutral-200"
+    }`;
+
+  const folderActive = hasToken(query, FOLDER_TOKEN);
+
   return (
     <div className="flex flex-wrap items-center gap-1">
+      {/* Carpetas primero: es el filtro que responde "¿dónde está tal carpeta?",
+          la pregunta más común sobre un catálogo de discos. */}
+      <button
+        onClick={() => setQuery(toggleToken(query, FOLDER_TOKEN, [CATEGORY_TOKEN_RX]))}
+        title={t("toolbar.categoryFolderTip")}
+        className={chip(folderActive)}
+      >
+        <Folder className="h-3.5 w-3.5" />
+        {t("toolbar.category_carpeta")}
+      </button>
       {Object.entries(FILE_CATEGORIES).map(([key]) => {
-        const active = searchQuery.trim() === `cat:${key}`;
+        const token = `cat:${key}`;
         return (
           <button
             key={key}
-            onClick={() => (active ? clearSearch() : runSearch(`cat:${key}`))}
-            className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors ${
-              active
-                ? "border-primary/40 bg-primary/15 text-primary"
-                : "border-border text-neutral-400 hover:bg-accent/60 hover:text-neutral-200"
-            }`}
+            onClick={() => setQuery(toggleToken(query, token, [TYPE_TOKEN_RX]))}
+            className={chip(hasToken(query, token))}
           >
             {CATEGORY_ICONS[key]}
             {t(`toolbar.category_${key}`)}

@@ -54,10 +54,21 @@ interface CatalogState {
   setViewMode: (m: ViewMode) => void;
 
   // Búsqueda (M3/M4)
+  /** Texto crudo del buscador. Es la fuente de verdad del input: los chips de
+   *  filtro escriben acá y la barra los ve, en vez de que cada uno tenga su
+   *  propia copia y se pisen (antes tocar un chip dejaba el input mostrando otra
+   *  cosa, y la siguiente tecla borraba el filtro). */
+  searchInput: string;
+  setSearchInput: (v: string) => void;
   searchQuery: string;
   searchResult: SearchResult | null;
   searching: boolean;
   parsedFilters: SearchFilters | null;
+
+  /** Agrupar los discos conectados arriba de los desconectados (barra lateral y
+   *  tabla de discos). Preferencia persistida. */
+  onlineFirst: boolean;
+  setOnlineFirst: (b: boolean) => void;
 
   // Búsqueda semántica (IA Fase 1)
   semantic: boolean;
@@ -119,6 +130,7 @@ const RESET_NAV = {
   contentEntries: [],
   selectedEntryId: null,
   selectedIds: [],
+  searchInput: "",
   searchQuery: "",
   searchResult: null,
   parsedFilters: null,
@@ -150,10 +162,30 @@ export const useCatalog = create<CatalogState>((set, get) => ({
     set({ viewMode });
   },
 
+  searchInput: "",
+  setSearchInput: (searchInput) => set({ searchInput }),
   searchQuery: "",
   searchResult: null,
   searching: false,
   parsedFilters: null,
+
+  onlineFirst: (() => {
+    try {
+      // Por defecto ON: lo que está conectado es lo único sobre lo que se puede
+      // actuar ahora (copiar, re-escanear, abrir), así que va arriba.
+      return localStorage.getItem("diskdex:onlineFirst") !== "0";
+    } catch {
+      return true;
+    }
+  })(),
+  setOnlineFirst: (onlineFirst) => {
+    try {
+      localStorage.setItem("diskdex:onlineFirst", onlineFirst ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    set({ onlineFirst });
+  },
 
   semantic: false,
   semanticThreshold: (() => {
@@ -454,7 +486,7 @@ export const useCatalog = create<CatalogState>((set, get) => ({
   },
 
   clearSearch: () =>
-    set({ mode: "browse", searchQuery: "", searchResult: null, parsedFilters: null }),
+    set({ mode: "browse", searchInput: "", searchQuery: "", searchResult: null, parsedFilters: null }),
 
   // Recarga el listado actual (carpeta en browse, o resultados en search) — p.ej.
   // tras mover un archivo a la papelera.

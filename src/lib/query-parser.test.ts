@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { parseQuery, parseSize, parseDate, hasCriteria } from "./query-parser";
+import {
+  parseQuery,
+  parseSize,
+  parseDate,
+  hasCriteria,
+  toggleToken,
+  hasToken,
+  FOLDER_TOKEN,
+  CATEGORY_TOKEN_RX,
+  TYPE_TOKEN_RX,
+} from "./query-parser";
 
 describe("parseSize", () => {
   it("parses units", () => {
@@ -70,5 +80,43 @@ describe("parseQuery", () => {
     expect(hasCriteria(parseQuery(""))).toBe(false);
     expect(hasCriteria(parseQuery("   "))).toBe(false);
     expect(hasCriteria(parseQuery("ext:mov"))).toBe(true);
+  });
+
+  it("solo type:carpeta ya es un criterio buscable", () => {
+    expect(hasCriteria(parseQuery(FOLDER_TOKEN))).toBe(true);
+    expect(parseQuery(FOLDER_TOKEN).kind).toBe("folder");
+  });
+});
+
+describe("toggleToken", () => {
+  it("agrega el token sin tocar lo que ya estaba escrito", () => {
+    expect(toggleToken("techo", FOLDER_TOKEN)).toBe("techo type:carpeta");
+  });
+
+  it("lo saca si ya estaba, y deja el resto", () => {
+    expect(toggleToken("techo type:carpeta", FOLDER_TOKEN)).toBe("techo");
+  });
+
+  it("carpetas y categoría se excluyen: activar una saca la otra", () => {
+    // Juntas darían cero resultados (una carpeta no tiene extensión).
+    expect(toggleToken("techo cat:video", FOLDER_TOKEN, [CATEGORY_TOKEN_RX])).toBe(
+      "techo type:carpeta",
+    );
+    expect(toggleToken("techo type:carpeta", "cat:video", [TYPE_TOKEN_RX])).toBe(
+      "techo cat:video",
+    );
+  });
+
+  it("dos categorías conviven (se suman las extensiones)", () => {
+    expect(toggleToken("cat:imagen", "cat:video", [TYPE_TOKEN_RX])).toBe("cat:imagen cat:video");
+    const f = parseQuery("cat:imagen cat:video");
+    expect(f.exts).toContain("jpg");
+    expect(f.exts).toContain("mov");
+  });
+
+  it("hasToken compara el token entero, no como subcadena", () => {
+    expect(hasToken("techo type:carpeta", FOLDER_TOKEN)).toBe(true);
+    expect(hasToken("type:carpetas-viejas", FOLDER_TOKEN)).toBe(false);
+    expect(hasToken("techo", FOLDER_TOKEN)).toBe(false);
   });
 });

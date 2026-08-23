@@ -1026,16 +1026,40 @@ fn run_copy(
         // Nunca pisar algo que no vinimos a reemplazar. El plan se calculó contra
         // el catálogo, que puede estar desactualizado respecto del disco real:
         // ante la duda, saltear y reportar, jamás sobreescribir.
-        if !item.overwrite && dst_path.exists() {
-            skipped += 1;
-            // Saltear NO es "no pasó nada": el plan lo daba por faltante y en el
-            // disco está. Esa discrepancia es justamente lo que el catálogo tiene
-            // desactualizado, así que se registra igual —con el tamaño real del
-            // destino— y la próxima comparación deja de pedirlo. Sin esto, todo
-            // lo copiado por una versión anterior quedaría faltante para siempre.
-            let real = std::fs::metadata(&dst_path).map(|m| m.len() as i64).unwrap_or(item.size);
-            copied_items.push((item.rel_path.clone(), real, false));
-            continue;
+        //
+        // `symlink_metadata` en vez de `exists()` por dos razones: no sigue
+        // symlinks (un enlace colgado SÍ ocupa el nombre, y `exists()` lo daba
+        // por libre), y distingue "no está" de "no se pudo averiguar". Esa
+        // distinción es la que importa: un destino con metadata dañada —exFAT
+        // con una entrada rota devuelve EINVAL, no ENOENT— hacía que `exists()`
+        // dijera `false` y la copia siguiera de largo, desactivando sola la
+        // única protección contra sobreescribir. Si no se puede leer el destino,
+        // no se escribe: se cuenta como fallo y se dice por qué.
+        match std::fs::symlink_metadata(&dst_path) {
+            Ok(m) if !item.overwrite => {
+                skipped += 1;
+                // Saltear NO es "no pasó nada": el plan lo daba por faltante y en el
+                // disco está. Esa discrepancia es justamente lo que el catálogo tiene
+                // desactualizado, así que se registra igual —con el tamaño real del
+                // destino— y la próxima comparación deja de pedirlo. Sin esto, todo
+                // lo copiado por una versión anterior quedaría faltante para siempre.
+                copied_items.push((item.rel_path.clone(), m.len() as i64, false));
+                continue;
+            }
+            // Existe y el plan sí marcó reemplazarlo: seguir de largo y copiar.
+            Ok(_) => {}
+            // No está: el caso normal de un faltante. Copiar.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                failed += 1;
+                if errors.len() < 50 {
+                    errors.push(format!(
+                        "{}: no se pudo leer el destino ({e}) — no se copió para no arriesgar pisar algo",
+                        item.rel_path
+                    ));
+                }
+                continue;
+            }
         }
 
         // Ambas rutas son atómicas (temporal + rename), así que el destino nunca
@@ -1193,6 +1217,74 @@ mod copy_tests {
         assert_eq!(std::fs::read(dst.join("A.bin")).unwrap(), b"nuevo");
         // El temporal de la copia atómica no queda tirado.
         assert!(!dst.join("A.bin.ddtmp").exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Si el destino no se puede LEER (metadata dañada, permisos, un tramo de la
+    /// ruta que no es carpeta), no alcanza con "no existe → copiá": eso pisaría
+    /// a ciegas. El caso real que lo motivó: exFAT devolviendo EINVAL sobre una
+    /// entrada de directorio rota, donde `exists()` respondía `false`. Acá se
+    /// reproduce con ENOTDIR, que llega por el mismo camino (Err ≠ NotFound).
+    #[test]
+    fn run_copy_reports_unreadable_destination_instead_of_copying_blind() {
+        let base = std::env::temp_dir().join(format!("diskdex_dsterr_{}", std::process::id()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(src.join("PIX")).unwrap();
+        std::fs::write(src.join("PIX/A.bin"), b"nuevo").unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        // En el destino "PIX" es un ARCHIVO, no una carpeta: stat de "PIX/A.bin"
+        // falla con ENOTDIR, no con NotFound.
+        std::fs::write(dst.join("PIX"), b"no soy una carpeta").unwrap();
+
+        let plan = vec![db::CopyItem {
+            rel_path: "PIX/A.bin".into(),
+            size: 5,
+            is_folder: false,
+            overwrite: false,
+        }];
+        let summary = run_copy(&plan, &src, &dst, 1, 5, false, || false, |_, _, _| {});
+
+        assert_eq!(summary.failed, 1, "el destino ilegible es un fallo, no un faltante");
+        assert_eq!(summary.copied, 0);
+        assert_eq!(summary.skipped, 0);
+        // Y se dice POR QUÉ: sin esto el usuario solo veía el conteo bajar.
+        assert!(summary.errors[0].contains("PIX/A.bin"), "{:?}", summary.errors);
+        // Nada se registra en el catálogo: no se escribió nada.
+        assert!(summary.copied_items.is_empty());
+        // El destino quedó intacto.
+        assert_eq!(std::fs::read(dst.join("PIX")).unwrap(), b"no soy una carpeta");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Un symlink colgado ocupa el nombre en el destino aunque su target no
+    /// exista. `exists()` sigue el enlace y decía "libre"; copiar ahí habría
+    /// escrito a través del symlink, fuera del árbol de destino.
+    #[test]
+    fn run_copy_treats_dangling_symlink_as_occupied() {
+        let base = std::env::temp_dir().join(format!("diskdex_dangling_{}", std::process::id()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("A.bin"), b"nuevo").unwrap();
+        std::os::unix::fs::symlink(base.join("no-existe"), dst.join("A.bin")).unwrap();
+
+        let plan = vec![db::CopyItem {
+            rel_path: "A.bin".into(),
+            size: 5,
+            is_folder: false,
+            overwrite: false,
+        }];
+        let summary = run_copy(&plan, &src, &dst, 1, 5, false, || false, |_, _, _| {});
+
+        assert_eq!(summary.skipped, 1, "el nombre está ocupado: saltear, no pisar");
+        assert_eq!(summary.copied, 0);
+        assert!(std::fs::symlink_metadata(dst.join("A.bin")).unwrap().file_type().is_symlink());
 
         let _ = std::fs::remove_dir_all(&base);
     }

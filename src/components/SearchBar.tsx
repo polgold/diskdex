@@ -15,7 +15,10 @@ import {
  *  búsqueda semántica por contenido (IA Fase 1) cuando el build la trae. */
 export function SearchBar() {
   const t = useT();
-  const [value, setValue] = useState("");
+  // El texto vive en el store, no acá: los chips de filtro de la barra de
+  // herramientas escriben sobre el mismo valor y así input y filtros no se pisan.
+  const value = useCatalog((s) => s.searchInput);
+  const setValue = useCatalog((s) => s.setSearchInput);
   const runSearch = useCatalog((s) => s.runSearch);
   const clearSearch = useCatalog((s) => s.clearSearch);
   const semantic = useCatalog((s) => s.semantic);

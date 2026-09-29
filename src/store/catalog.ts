@@ -100,6 +100,7 @@ interface CatalogState {
    *  desde el catálogo. Funciona offline. */
   jumpToEntry: (entry: { id: number; disk_id: number; disk_name: string; is_folder: boolean; name: string }) => Promise<void>;
   navigateToCrumb: (index: number) => Promise<void>;
+  backToResults: () => void;
   selectEntry: (id: number | null) => void;
   setSelection: (ids: number[], primary: number | null) => void;
 
@@ -372,6 +373,10 @@ export const useCatalog = create<CatalogState>((set, get) => ({
     } catch (e) {
       if (token === navToken) set({ error: String(e), contentLoading: false });
     }
+  },
+
+  backToResults: () => {
+    if (get().searchResult) set({ mode: "search", selectedEntryId: null, selectedIds: [] });
   },
 
   selectEntry: (id) => set({ selectedEntryId: id, selectedIds: id == null ? [] : [id] }),

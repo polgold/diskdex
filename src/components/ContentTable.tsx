@@ -6,6 +6,8 @@ import {
   ChevronDown,
   Folder,
   HardDrive,
+  FolderOpen,
+  ArrowLeft,
   File as FileIcon,
   Search,
   Loader2,
@@ -119,6 +121,8 @@ function compareSearch(a: SearchItem, b: SearchItem, sort: SortState): number {
       return (a.size_logical - b.size_logical) * dir;
     case "path":
       return a.path.localeCompare(b.path) * dir;
+    case "modified":
+      return ((a.modified_at ?? 0) - (b.modified_at ?? 0)) * dir;
     default:
       return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) * dir;
   }
@@ -204,7 +208,16 @@ interface MenuState {
 }
 
 /** Menú contextual propio (clic derecho) sobre un ítem. */
-function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) {
+function RowContextMenu({
+  menu,
+  onClose,
+  onReveal,
+}: {
+  menu: MenuState;
+  onClose: () => void;
+  /** Solo en resultados de búsqueda: ir a la ubicación dentro del catálogo. */
+  onReveal?: () => void;
+}) {
   const t = useT();
   const setError = useCatalog((s) => s.setError);
   const reloadCurrent = useCatalog((s) => s.reloadCurrent);
@@ -239,6 +252,15 @@ function RowContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => voi
   }
 
   const items = [
+    ...(onReveal
+      ? [
+          {
+            label: t("table.showInCatalog"),
+            icon: <FolderOpen className="h-3.5 w-3.5" />,
+            fn: async () => onReveal(),
+          },
+        ]
+      : []),
     {
       label: t("table.revealInFinder"),
       icon: <FolderSearch className="h-3.5 w-3.5" />,
@@ -445,9 +467,20 @@ function Breadcrumb() {
   const breadcrumb = useCatalog((s) => s.breadcrumb);
   const navigateToCrumb = useCatalog((s) => s.navigateToCrumb);
   const showAllDisks = useCatalog((s) => s.showAllDisks);
+  const hasResults = useCatalog((s) => s.searchResult != null);
+  const backToResults = useCatalog((s) => s.backToResults);
   if (breadcrumb.length === 0) return null;
   return (
     <div className="flex flex-wrap items-center gap-0.5 border-b border-neutral-800 px-3 py-1.5 text-xs text-neutral-400">
+      {hasResults && (
+        <button
+          onClick={backToResults}
+          className="mr-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-primary hover:bg-neutral-800"
+        >
+          <ArrowLeft className="h-3 w-3" />
+          {t("table.backToResults")}
+        </button>
+      )}
       {/* Nivel raíz: siempre presente, para volver a la lista de todos los discos. */}
       <button
         onClick={showAllDisks}
@@ -509,6 +542,14 @@ function BrowseTable() {
     estimateSize: () => 30,
     overscan: 25,
   });
+
+  // Al llegar desde "mostrar en el catálogo", la entrada ya viene seleccionada:
+  // llevarla a la vista cuando se carga la carpeta.
+  useEffect(() => {
+    const i = rows.findIndex((e) => e.id === useCatalog.getState().selectedEntryId);
+    if (i >= 0) rv.scrollToIndex(i, { align: "center" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries]);
 
   // Navegación con teclado: ↑/↓ mueven la selección (no la ventana) y Enter abre carpeta.
   const selectedIndex = rows.findIndex((e) => e.id === selectedEntryId);
@@ -698,11 +739,22 @@ function SearchTable() {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const selSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const viewMode = useCatalog((s) => s.viewMode);
+  const setViewMode = useCatalog((s) => s.setViewMode);
   const rawItems: SearchItem[] = result?.items ?? [];
-  const { widths, startResize } = useColWidths("diskdex:cols:search", {
-    disk: 128,
+
+  // Ir a la ubicación dentro del catálogo, en modo lista y navegable:
+  // carpeta → entra en ella; archivo → abre su carpeta con el archivo seleccionado.
+  const goTo = (it: SearchItem) => {
+    setViewMode("table");
+    return jumpToEntry(it);
+  };
+
+  // v2: columnas Nombre · Tamaño · Ubicación · Modificado (la clave nueva
+  // descarta anchos viejos que podían dejar "Nombre" aplastado a cero).
+  const { widths, startResize } = useColWidths("diskdex:cols:search:v2", {
     size: 96,
     path: 360,
+    modified: 140,
   });
   // Clave :v2 a propósito. La v1 guardaba el orden por columna y bastaba con
   // haber tocado una vez la cabecera "Disco" para que TODA búsqueda posterior
@@ -746,6 +798,14 @@ function SearchTable() {
         setSelection(items.map((r) => r.id), items[items.length - 1]?.id ?? null);
         return;
       }
+      if (e.key === "Enter") {
+        const cur = items[selectedIndex];
+        if (cur) {
+          e.preventDefault();
+          goTo(cur);
+        }
+        return;
+      }
       if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
       e.preventDefault();
       const delta = e.key === "ArrowDown" ? 1 : -1;
@@ -765,11 +825,21 @@ function SearchTable() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, selectedIndex, selectEntry, setSelection, selectedIds, selectedEntryId, reloadCurrent, setError, rv, t]);
 
   return (
     <div className="flex h-full flex-col">
-      {menu && <RowContextMenu menu={menu} onClose={() => setMenu(null)} />}
+      {menu && (
+        <RowContextMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onReveal={() => {
+            const it = items.find((x) => x.id === menu.id);
+            if (it) goTo(it);
+          }}
+        />
+      )}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-neutral-800 px-3 py-1.5 text-xs text-neutral-400">
         <Search className="h-3.5 w-3.5" />
         {searching ? (
@@ -814,7 +884,7 @@ function SearchTable() {
           onOpen={(it) => {
             // Carpeta: navegar su estructura desde el catálogo (funciona offline).
             // Archivo: abrir el original, que sí requiere el disco montado.
-            if (it.is_folder) jumpToEntry(it);
+            if (it.is_folder) goTo(it);
             else openOriginal(it.id).catch((err) => setError(String(err)));
           }}
           onMenu={(e, it) => {
@@ -832,9 +902,9 @@ function SearchTable() {
       <ResizableHeaderRow
         cols={[
           { key: "name", label: t("table.colName"), flex: true },
-          { key: "disk", label: t("table.colDisk") },
           { key: "size", label: t("table.colSize"), align: "right" },
-          { key: "path", label: t("table.colPath") },
+          { key: "path", label: t("table.colLocation") },
+          { key: "modified", label: t("table.colModified") },
         ]}
         widths={widths}
         startResize={startResize}
@@ -852,9 +922,8 @@ function SearchTable() {
                 key={it.id}
                 onClick={(ev) => applyClickSelection(ev, items, vi.index, selectedIds, anchorRef, setSelection)}
                 onDoubleClick={() => {
-                  if (it.is_folder) { jumpToEntry(it); return; }
-                  const fn = openOriginal;
-                  fn(it.id).catch((err) => setError(String(err)));
+                  if (it.is_folder) goTo(it);
+                  else openOriginal(it.id).catch((err) => setError(String(err)));
                 }}
                 onContextMenu={(ev) => {
                   ev.preventDefault();
@@ -900,23 +969,28 @@ function SearchTable() {
                   )}
                 </span>
                 <span
-                  className="shrink-0 truncate text-xs text-neutral-400"
-                  style={{ width: widths.disk }}
-                >
-                  {it.disk_name}
-                </span>
-                <span
                   className="shrink-0 text-right font-mono text-xs text-neutral-400"
                   style={{ width: widths.size }}
                 >
                   {it.is_folder ? "—" : formatBytes(it.size_logical)}
                 </span>
-                <span
-                  className="shrink-0 truncate font-mono text-[11px] text-neutral-500"
+                <button
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    goTo(it);
+                  }}
+                  onDoubleClick={(ev) => ev.stopPropagation()}
+                  className="shrink-0 truncate text-left font-mono text-[11px] text-neutral-500 hover:text-primary hover:underline"
                   style={{ width: widths.path }}
-                  title={it.path}
+                  title={`${it.path}\n${t("table.showInCatalog")}`}
                 >
                   {it.path}
+                </button>
+                <span
+                  className="shrink-0 font-mono text-xs text-neutral-500"
+                  style={{ width: widths.modified }}
+                >
+                  {formatDate(it.modified_at)}
                 </span>
               </div>
             );

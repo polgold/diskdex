@@ -16,19 +16,19 @@ export const site = {
    * olvidarse ya no deja el sitio desactualizado.
    */
   fallback: {
-    version: "0.1.0",
+    version: "0.2.1",
     downloads: {
       macArm: {
-        available: false,
-        href: "https://github.com/polgold/diskdex/releases",
+        available: true,
+        href: "https://github.com/polgold/diskdex/releases/download/v0.2.1/DiskDex_0.2.1_aarch64.dmg",
       },
       macIntel: {
         available: true,
-        href: "https://github.com/polgold/diskdex/releases/download/v0.1.0/DiskDex_0.1.0_x64.dmg",
+        href: "https://github.com/polgold/diskdex/releases/download/v0.2.1/DiskDex_0.2.1_x64.dmg",
       },
       win: {
-        available: false,
-        href: "https://github.com/polgold/diskdex/releases",
+        available: true,
+        href: "https://github.com/polgold/diskdex/releases/download/v0.2.1/DiskDex_0.2.1_x64-setup.exe",
       },
     },
   },

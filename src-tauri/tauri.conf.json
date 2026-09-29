@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DiskDex",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.polgold.diskdex",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -36,6 +36,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }
